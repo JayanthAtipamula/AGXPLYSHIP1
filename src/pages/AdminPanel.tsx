@@ -6,6 +6,7 @@ import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X,
 import { LeadsView } from '../components/LeadsView';
 import { ExpiringPlans } from '../components/ExpiringPlans';
 import { CreatePage } from './CreatePage';
+import { LeadDistribution } from '../components/LeadDistribution';
 
 interface Company {
   id: string;
@@ -842,6 +843,8 @@ export function AdminPanel() {
         />;
       case 'createPage':
         return <CreatePage />;
+      case 'leadDistribution':
+        return <LeadDistribution />;
       default:
         return null;
     }
@@ -907,6 +910,15 @@ export function AdminPanel() {
             >
               <Layout className="w-5 h-5" />
               <span>Create Page</span>
+            </button>
+            <button
+              onClick={() => setActiveView('leadDistribution')}
+              className={`w-full flex items-center space-x-2 px-4 py-2 rounded-md ${
+                activeView === 'leadDistribution' ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Layout className="w-5 h-5" />
+              <span>Lead Distribution</span>
             </button>
           </nav>
         </div>

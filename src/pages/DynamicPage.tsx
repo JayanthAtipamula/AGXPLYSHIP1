@@ -22,6 +22,16 @@ export function DynamicPage() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
+  // Function to shuffle array
+  const shuffleArray = (array: Company[]) => {
+    const shuffled = [...array];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+  };
+
   const fetchPageData = React.useCallback(async () => {
     if (!pageId) {
       setError('Invalid page ID');
@@ -98,7 +108,8 @@ export function DynamicPage() {
         return;
       }
 
-      setCompanies(validCompanies);
+      // Shuffle the companies before setting state
+      setCompanies(shuffleArray(validCompanies));
     } catch (err) {
       console.error('Error fetching page data:', err);
       setError('Failed to load page data');
@@ -106,6 +117,17 @@ export function DynamicPage() {
       setLoading(false);
     }
   }, [pageId]);
+
+  // Add effect to reshuffle companies periodically
+  React.useEffect(() => {
+    if (companies.length > 0) {
+      const intervalId = setInterval(() => {
+        setCompanies(shuffleArray(companies));
+      }, 300000); // Reshuffle every 5 minutes
+
+      return () => clearInterval(intervalId);
+    }
+  }, [companies]);
 
   React.useEffect(() => {
     fetchPageData();

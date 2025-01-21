@@ -16,6 +16,10 @@ interface Page {
   createdAt: string;
 }
 
+interface CompanyWithPages extends Company {
+  pages: { id: string; pageId: string }[];
+}
+
 export function CreatePage() {
   const [companies, setCompanies] = React.useState<Company[]>([]);
   const [selectedCompanies, setSelectedCompanies] = React.useState<Set<string>>(new Set());
@@ -25,11 +29,49 @@ export function CreatePage() {
   const [pageId, setPageId] = React.useState('');
   const [pages, setPages] = React.useState<Page[]>([]);
   const [editingPage, setEditingPage] = React.useState<Page | null>(null);
+  const [companiesWithPages, setCompaniesWithPages] = React.useState<CompanyWithPages[]>([]);
 
   React.useEffect(() => {
     fetchPages();
-    fetchCompanies();
+    fetchCompaniesWithPages();
   }, []);
+
+  const fetchCompaniesWithPages = async () => {
+    try {
+      setLoading(true);
+      // Fetch companies
+      const companiesSnapshot = await getDocs(collection(db, 'companies'));
+      const companiesData = companiesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        name: doc.data().name,
+        logo: doc.data().logo,
+        pages: []
+      }));
+
+      // Fetch pages
+      const pagesSnapshot = await getDocs(collection(db, 'pages'));
+      const pagesData = pagesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        pageId: doc.data().pageId,
+        companies: doc.data().companies
+      }));
+
+      // Map pages to companies
+      const companiesWithPagesData = companiesData.map(company => ({
+        ...company,
+        pages: pagesData
+          .filter(page => page.companies.includes(company.id))
+          .map(page => ({ id: page.id, pageId: page.pageId }))
+      }));
+
+      setCompaniesWithPages(companiesWithPagesData);
+    } catch (err) {
+      console.error('Error fetching companies:', err);
+      setError('Failed to load companies');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const fetchCompanies = async () => {
     try {
@@ -197,7 +239,7 @@ export function CreatePage() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {companies.map(company => (
+                {companiesWithPages.map(company => (
                   <div
                     key={company.id}
                     className={`p-4 border rounded-lg cursor-pointer transition-colors ${
@@ -207,7 +249,7 @@ export function CreatePage() {
                     }`}
                     onClick={() => toggleCompany(company.id)}
                   >
-                    <div className="flex items-center space-x-3">
+                    <div className="flex items-center space-x-3 mb-3">
                       <div className="flex-shrink-0">
                         <img
                           src={company.logo}
@@ -225,6 +267,27 @@ export function CreatePage() {
                           <Check className="w-5 h-5 text-blue-600" />
                         )}
                       </div>
+                    </div>
+
+                    {/* Show pages the company is added to */}
+                    <div className="mt-2 space-y-1">
+                      {company.pages.length > 0 ? (
+                        <>
+                          <p className="text-xs text-gray-500">Added to pages:</p>
+                          <div className="flex flex-wrap gap-1">
+                            {company.pages.map(page => (
+                              <span
+                                key={page.id}
+                                className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800"
+                              >
+                                {page.pageId}
+                              </span>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-xs text-gray-500">Not added to any pages</p>
+                      )}
                     </div>
                   </div>
                 ))}
