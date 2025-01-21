@@ -1,23 +1,27 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
 import { HomePage } from './pages/HomePage';
 import { AdminPanel } from './pages/AdminPanel';
+import { OwnerLogin } from './pages/OwnerLogin';
+import { OwnerDashboard } from './pages/OwnerDashboard';
 
 export default function App() {
   return (
-    <Router>
+    <BrowserRouter>
       <div className="flex flex-col min-h-screen">
         <Header />
         <main className="flex-grow pt-16">
           <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/admin" element={<AdminPanel />} />
+            <Route path="/owner-login" element={<OwnerLogin />} />
+            <Route path="/owner-dashboard" element={<OwnerDashboard />} />
           </Routes>
         </main>
         <Footer />
       </div>
-    </Router>
+    </BrowserRouter>
   );
 }

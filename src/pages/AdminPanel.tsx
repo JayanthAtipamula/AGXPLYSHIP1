@@ -2,7 +2,7 @@ import * as React from 'react';
 import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
-import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle } from 'lucide-react';
+import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { LeadsView } from '../components/LeadsView';
 import { ExpiringPlans } from '../components/ExpiringPlans';
 
@@ -19,6 +19,7 @@ interface Company {
   subscriptionPlan: '1M' | '3M' | '6M' | '1Y';
   subscriptionStartDate: string;
   projectImages?: string[];
+  password: string;
 }
 
 type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads' | 'expiring';
@@ -44,7 +45,8 @@ export function AdminPanel() {
     ownerName: '',
     ownerPhone: '',
     subscriptionPlan: '1M',
-    subscriptionStartDate: ''
+    subscriptionStartDate: '',
+    password: ''
   });
   const [logoFile, setLogoFile] = React.useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
@@ -54,6 +56,7 @@ export function AdminPanel() {
   const [deletingCompanies, setDeletingCompanies] = React.useState(false);
   const [editingCompany, setEditingCompany] = React.useState<Company | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = React.useState(false);
+  const [showPassword, setShowPassword] = React.useState(false);
 
   React.useEffect(() => {
     fetchData();
@@ -91,7 +94,8 @@ export function AdminPanel() {
           ownerPhone: data.ownerPhone || '',
           subscriptionPlan: data.subscriptionPlan || '1M',
           subscriptionStartDate: data.subscriptionStartDate || '',
-          projectImages: data.projectImages || []
+          projectImages: data.projectImages || [],
+          password: data.password || ''
         };
       }) as Company[];
       setCompanies(companiesData);
@@ -174,7 +178,8 @@ export function AdminPanel() {
         ownerPhone: `+91${formData.ownerPhone}`,
         subscriptionPlan: formData.subscriptionPlan,
         subscriptionStartDate: formData.subscriptionStartDate,
-        projectImages: projectImageUrls
+        projectImages: projectImageUrls,
+        password: formData.password
       };
 
       await addDoc(collection(db, 'companies'), companyData);
@@ -189,7 +194,8 @@ export function AdminPanel() {
         ownerName: '',
         ownerPhone: '',
         subscriptionPlan: '1M',
-        subscriptionStartDate: ''
+        subscriptionStartDate: '',
+        password: ''
       });
       setLogoFile(null);
       setPreviewUrl(null);
@@ -287,6 +293,7 @@ export function AdminPanel() {
         numberOfProjects: formData.numberOfProjects ? parseInt(formData.numberOfProjects) : 'Not Available',
         ownerPhone: `+91${formData.ownerPhone}`,
         projectsLink: formData.projectsLink.trim() || '',
+        password: formData.password || editingCompany.password
       };
 
       // Handle logo update if new logo is selected
@@ -336,7 +343,8 @@ export function AdminPanel() {
       ownerName: company.ownerName,
       ownerPhone: company.ownerPhone.replace('+91', ''),
       subscriptionPlan: company.subscriptionPlan,
-      subscriptionStartDate: company.subscriptionStartDate
+      subscriptionStartDate: company.subscriptionStartDate,
+      password: company.password
     });
     if (company.projectImages) {
       setProjectImages(
@@ -360,7 +368,8 @@ export function AdminPanel() {
       ownerName: '',
       ownerPhone: '',
       subscriptionPlan: '1M',
-      subscriptionStartDate: ''
+      subscriptionStartDate: '',
+      password: ''
     });
     setLogoFile(null);
     setPreviewUrl(null);
@@ -682,6 +691,35 @@ export function AdminPanel() {
                       onChange={(e) => setFormData(prev => ({ ...prev, subscriptionStartDate: e.target.value }))}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        required
+                        value={formData.password}
+                        onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="Enter password"
+                        minLength={6}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                      >
+                        {showPassword ? (
+                          <EyeOff className="h-5 w-5 text-gray-400" />
+                        ) : (
+                          <Eye className="h-5 w-5 text-gray-400" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500">Minimum 6 characters</p>
                   </div>
                 </div>
               </div>
@@ -1028,6 +1066,36 @@ export function AdminPanel() {
                         onChange={(e) => setFormData(prev => ({ ...prev, subscriptionStartDate: e.target.value }))}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Password
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showPassword ? "text" : "password"}
+                          value={formData.password}
+                          onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="Leave blank to keep current password"
+                          minLength={6}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                        >
+                          {showPassword ? (
+                            <EyeOff className="h-5 w-5 text-gray-400" />
+                          ) : (
+                            <Eye className="h-5 w-5 text-gray-400" />
+                          )}
+                        </button>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {formData.password ? 'Minimum 6 characters' : 'Leave blank to keep current password'}
+                      </p>
                     </div>
                   </div>
                 </div>
