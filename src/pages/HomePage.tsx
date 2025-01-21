@@ -44,22 +44,30 @@ export function HomePage() {
         const querySnapshot = await getDocs(collection(db, 'companies'));
         const companiesData = querySnapshot.docs.map(doc => ({
           id: doc.id,
-          ...doc.data()
+          name: doc.data().name || '',
+          logo: doc.data().logo || '',
+          yearsExperience: Number(doc.data().yearsExperience) || 0,
+          numberOfProjects: Number(doc.data().numberOfProjects) || 0,
+          location: doc.data().location || '',
+          projectsLink: doc.data().projectsLink || '#',
+          projectImages: doc.data().projectImages || []
         })) as Company[];
 
         if (companiesData.length === 0) {
-          // If no companies exist, seed demo data
           await seedDemoData();
-          // Fetch again after seeding
           const newSnapshot = await getDocs(collection(db, 'companies'));
           const newCompaniesData = newSnapshot.docs.map(doc => ({
             id: doc.id,
-            ...doc.data()
+            name: doc.data().name || '',
+            logo: doc.data().logo || '',
+            yearsExperience: Number(doc.data().yearsExperience) || 0,
+            numberOfProjects: Number(doc.data().numberOfProjects) || 0,
+            location: doc.data().location || '',
+            projectsLink: doc.data().projectsLink || '#',
+            projectImages: doc.data().projectImages || []
           })) as Company[];
-          // Shuffle before setting state
           setCompanies(shuffleArray(newCompaniesData));
         } else {
-          // Shuffle before setting state
           setCompanies(shuffleArray(companiesData));
         }
         setError(null);
@@ -75,7 +83,6 @@ export function HomePage() {
   }, []);
 
   React.useEffect(() => {
-    // Load more companies when user scrolls near the bottom
     if (inView) {
       const nextBatch = companies.slice(
         visibleCompanies.length,
@@ -88,7 +95,6 @@ export function HomePage() {
   }, [inView, companies]);
 
   React.useEffect(() => {
-    // Reset visible companies when companies array changes
     setVisibleCompanies(companies.slice(0, 5));
   }, [companies]);
 
@@ -146,7 +152,14 @@ export function HomePage() {
             {visibleCompanies.map(company => (
               <CompanyCard
                 key={company.id}
-                {...company}
+                id={company.id}
+                name={company.name}
+                logo={company.logo}
+                yearsExperience={company.yearsExperience}
+                numberOfProjects={company.numberOfProjects}
+                location={company.location}
+                projectsLink={company.projectsLink}
+                projectImages={company.projectImages}
               />
             ))}
             {visibleCompanies.length < companies.length && (

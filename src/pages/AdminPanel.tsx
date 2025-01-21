@@ -2,9 +2,10 @@ import * as React from 'react';
 import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
-import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff } from 'lucide-react';
+import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff, Layout } from 'lucide-react';
 import { LeadsView } from '../components/LeadsView';
 import { ExpiringPlans } from '../components/ExpiringPlans';
+import { CreatePage } from './CreatePage';
 
 interface Company {
   id: string;
@@ -22,7 +23,7 @@ interface Company {
   password: string;
 }
 
-type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads' | 'expiring';
+type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads' | 'expiring' | 'createPage';
 
 interface ProjectImage {
   file: File;
@@ -839,6 +840,8 @@ export function AdminPanel() {
           companies={companies} 
           onUpdateSubscription={handleUpdateSubscription}
         />;
+      case 'createPage':
+        return <CreatePage />;
       default:
         return null;
     }
@@ -895,6 +898,15 @@ export function AdminPanel() {
             >
               <AlertTriangle className="w-5 h-5" />
               <span>Expiring Plans</span>
+            </button>
+            <button
+              onClick={() => setActiveView('createPage')}
+              className={`w-full flex items-center space-x-2 px-4 py-2 rounded-md ${
+                activeView === 'createPage' ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Layout className="w-5 h-5" />
+              <span>Create Page</span>
             </button>
           </nav>
         </div>

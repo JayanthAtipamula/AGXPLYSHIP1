@@ -6,6 +6,7 @@ import { HomePage } from './pages/HomePage';
 import { AdminPanel } from './pages/AdminPanel';
 import { OwnerLogin } from './pages/OwnerLogin';
 import { OwnerDashboard } from './pages/OwnerDashboard';
+import { DynamicPage } from './pages/DynamicPage';
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
             <Route path="/admin" element={<AdminPanel />} />
             <Route path="/owner-login" element={<OwnerLogin />} />
             <Route path="/owner-dashboard" element={<OwnerDashboard />} />
+            <Route path="/page/:pageId" element={<DynamicPage />} />
           </Routes>
         </main>
         <Footer />

@@ -10,7 +10,7 @@ interface CompanyCardProps {
   numberOfProjects: number;
   location: string;
   projectsLink: string;
-  projectImages?: string[]; // Optional array of project images
+  projectImages?: string[];
 }
 
 const ImageWithFallback = ({ src, alt, className }: { src: string; alt: string; className: string }) => {
@@ -57,7 +57,7 @@ export function CompanyCard({
   numberOfProjects,
   location,
   projectsLink,
-  projectImages = [] // Default to empty array
+  projectImages = []
 }: CompanyCardProps) {
   const [showConsultationForm, setShowConsultationForm] = React.useState(false);
   const [showBookingForm, setShowBookingForm] = React.useState(false);
