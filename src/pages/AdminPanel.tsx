@@ -2,7 +2,8 @@ import * as React from 'react';
 import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
-import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X } from 'lucide-react';
+import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar } from 'lucide-react';
+import { LeadsView } from '../components/LeadsView';
 
 interface Company {
   id: string;
@@ -14,7 +15,7 @@ interface Company {
   projectsLink: string;
 }
 
-type ActiveView = 'dashboard' | 'companies' | 'addCompany';
+type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads';
 
 interface ProjectImage {
   file: File;
@@ -450,6 +451,8 @@ export function AdminPanel() {
             </form>
           </div>
         );
+      case 'leads':
+        return <LeadsView />;
       default:
         return null;
     }
@@ -488,6 +491,15 @@ export function AdminPanel() {
             >
               <UserPlus className="w-5 h-5" />
               <span>Add Company</span>
+            </button>
+            <button
+              onClick={() => setActiveView('leads')}
+              className={`w-full flex items-center space-x-2 px-4 py-2 rounded-md ${
+                activeView === 'leads' ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Calendar className="w-5 h-5" />
+              <span>View Leads</span>
             </button>
           </nav>
         </div>

@@ -1,116 +1,113 @@
 import * as React from 'react';
-import { useState } from 'react';
 import { addDoc, collection } from 'firebase/firestore';
-import { db } from '../firebase/config'; // Make sure you have this firebase config file
+import { db } from '../lib/firebase';
+import { Loader2 } from 'lucide-react';
 
 interface ContactFormProps {
   onSubmit: () => void;
   type: 'consultation' | 'visit';
+  companyId: string;
+  companyName: string;
 }
 
-export function ContactForm({ onSubmit, type }: ContactFormProps) {
-  const [formData, setFormData] = useState({
+export function ContactForm({ onSubmit, type, companyId, companyName }: ContactFormProps) {
+  const [formData, setFormData] = React.useState({
     name: '',
-    email: '',
     phone: ''
   });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
-
     try {
-      // Add timestamp and form type to the data
-      const leadData = {
-        ...formData,
-        type: type, // 'consultation' or 'visit'
-        timestamp: new Date(),
-        status: 'new'
-      };
+      setSubmitting(true);
+      setError(null);
 
-      // Add to Firestore
-      await addDoc(collection(db, 'leads'), leadData);
-      
-      // Clear form and close modal
-      setFormData({ name: '', email: '', phone: '' });
+      await addDoc(collection(db, 'leads'), {
+        name: formData.name,
+        phone: `+91${formData.phone}`,
+        type,
+        companyId,
+        companyName,
+        timestamp: new Date().toISOString(),
+        status: 'new'
+      });
+
       onSubmit();
-    } catch (error) {
-      console.error('Error submitting form:', error);
-      alert('There was an error submitting your request. Please try again.');
+    } catch (err) {
+      console.error('Error submitting form:', err);
+      setError('Failed to submit form. Please try again.');
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(false);
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let value = e.target.value;
+    // Only allow digits and limit to 10 characters
+    value = value.replace(/\D/g, '').slice(0, 10);
+    setFormData(prev => ({ ...prev, phone: value }));
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label htmlFor="name" className="block text-sm font-medium text-gray-700">
+        <label className="block text-sm font-medium text-gray-700 mb-1">
           Name
         </label>
         <input
           type="text"
-          id="name"
-          name="name"
           required
           value={formData.name}
-          onChange={handleChange}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 focus:border-red-500 focus:outline-none focus:ring-red-500"
+          onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+          placeholder="Enter your name"
+          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
       </div>
 
       <div>
-        <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-          Email
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Mobile Number
         </label>
-        <input
-          type="email"
-          id="email"
-          name="email"
-          required
-          value={formData.email}
-          onChange={handleChange}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 focus:border-red-500 focus:outline-none focus:ring-red-500"
-        />
+        <div className="flex">
+          <div className="flex-shrink-0">
+            <div className="flex items-center h-full px-3 py-2 text-gray-500 bg-gray-50 border border-r-0 border-gray-300 rounded-l-md">
+              +91
+            </div>
+          </div>
+          <input
+            type="tel"
+            required
+            value={formData.phone}
+            onChange={handlePhoneChange}
+            placeholder="Enter 10-digit number"
+            pattern="\d{10}"
+            title="Please enter a valid 10-digit mobile number"
+            className="flex-1 px-3 py-2 border border-gray-300 rounded-r-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <p className="mt-1 text-xs text-gray-500">Enter 10-digit mobile number</p>
       </div>
 
-      <div>
-        <label htmlFor="phone" className="block text-sm font-medium text-gray-700">
-          Phone Number
-        </label>
-        <input
-          type="tel"
-          id="phone"
-          name="phone"
-          required
-          value={formData.phone}
-          onChange={handleChange}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 focus:border-red-500 focus:outline-none focus:ring-red-500"
-        />
-      </div>
+      {error && (
+        <p className="text-red-600 text-sm">{error}</p>
+      )}
 
-      <div className="flex justify-end space-x-3 pt-4">
-        <button
-          type="button"
-          onClick={onSubmit}
-          className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-        >
-          Cancel
-        </button>
-        <button
-          type="submit"
-          disabled={isSubmitting}
-          className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-50"
-        >
-          {isSubmitting ? 'Submitting...' : 'Submit'}
-        </button>
-      </div>
+      <button
+        type="submit"
+        disabled={submitting}
+        className="w-full py-2 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+      >
+        {submitting ? (
+          <span className="flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" />
+            Submitting...
+          </span>
+        ) : (
+          'Submit'
+        )}
+      </button>
     </form>
   );
 }

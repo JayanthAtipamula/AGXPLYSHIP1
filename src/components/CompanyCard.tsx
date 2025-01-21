@@ -13,6 +13,42 @@ interface CompanyCardProps {
   projectImages?: string[]; // Optional array of project images
 }
 
+const ImageWithFallback = ({ src, alt, className }: { src: string; alt: string; className: string }) => {
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [error, setError] = React.useState(false);
+
+  return (
+    <div className={`relative ${className} bg-gray-100`}>
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-200 animate-pulse">
+          <div className="w-full h-full bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 animate-shimmer" 
+               style={{
+                 backgroundSize: '200% 100%',
+                 animation: 'shimmer 1.5s infinite'
+               }}
+          />
+        </div>
+      )}
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className={`${className} ${isLoading ? 'opacity-0' : 'opacity-100'} transition-opacity duration-300`}
+        onLoad={() => setIsLoading(false)}
+        onError={() => {
+          setError(true);
+          setIsLoading(false);
+        }}
+      />
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-100">
+          <span className="text-gray-400">Failed to load image</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export function CompanyCard({ 
   id, 
   name, 
@@ -39,7 +75,7 @@ export function CompanyCard({
         <div className="flex flex-col md:flex-row md:p-6">
           <div className="relative">
             <div className="w-32 h-32 md:w-56 md:h-48 flex-shrink-0 m-4">
-              <img 
+              <ImageWithFallback 
                 src={logo} 
                 alt={name} 
                 className="w-full h-full object-cover rounded-lg shadow-sm"
@@ -82,7 +118,7 @@ export function CompanyCard({
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 py-3">
                   {displayImages.map((img, index) => (
                     <div key={index} className="aspect-square rounded-md overflow-hidden">
-                      <img 
+                      <ImageWithFallback 
                         src={img} 
                         alt={`Project ${index + 1}`} 
                         className="w-full h-full object-cover"
@@ -141,6 +177,8 @@ export function CompanyCard({
                   setShowBookingForm(false);
                 }}
                 type={showConsultationForm ? 'consultation' : 'visit'}
+                companyId={id}
+                companyName={name}
               />
             </div>
           </div>
