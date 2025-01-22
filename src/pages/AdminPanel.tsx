@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc, query, where, writeBatch, orderBy, limit } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
 import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff, Layout } from 'lucide-react';
@@ -24,7 +24,36 @@ interface Company {
   password: string;
 }
 
-type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads' | 'expiring' | 'createPage';
+interface Lead {
+  id: string;
+  name: string;
+  phone: string;
+  type: 'consultation' | 'visit';
+  timestamp: string;
+  companyId?: string;
+  distributedAt?: string;
+}
+
+interface DistributionHistory {
+  id: string;
+  timestamp: string;
+  todayLeads: number;
+  rotatedLeads: number;
+  expiredLeads: number;
+  activeCompanies: number;
+  distributionSummary: Record<string, {
+    newLeads: number;
+    consultationLeads: number;
+    visitLeads: number;
+  }>;
+  rotationSummary: Record<string, {
+    rotatedLeads: number;
+    consultationLeads: number;
+    visitLeads: number;
+  }>;
+}
+
+type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads' | 'expiring' | 'createPage' | 'leadDistribution';
 
 interface ProjectImage {
   file: File;
@@ -59,6 +88,32 @@ export function AdminPanel() {
   const [editingCompany, setEditingCompany] = React.useState<Company | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = React.useState(false);
   const [showPassword, setShowPassword] = React.useState(false);
+  const [showDistributionModal, setShowDistributionModal] = React.useState(false);
+  const [distributionResults, setDistributionResults] = React.useState<{
+    todayLeads: number;
+    rotatedLeads: number;
+    expiredLeads: number;
+    activeCompanies: number;
+    distributionSummary: Record<string, {
+      newLeads: number;
+      consultationLeads: number;
+      visitLeads: number;
+    }>;
+    rotationSummary: Record<string, {
+      rotatedLeads: number;
+      consultationLeads: number;
+      visitLeads: number;
+    }>;
+  } | null>(null);
+  const [distributionOptions, setDistributionOptions] = React.useState({
+    distributeToday: true,
+    distributeYesterday: true
+  });
+  const [todayLeadsCount, setTodayLeadsCount] = React.useState(0);
+  const [yesterdayLeadsCount, setYesterdayLeadsCount] = React.useState(0);
+  const [companyLeadCounts, setCompanyLeadCounts] = React.useState<Record<string, number>>({});
+  const [showHistoryModal, setShowHistoryModal] = React.useState(false);
+  const [distributionHistory, setDistributionHistory] = React.useState<DistributionHistory[]>([]);
 
   React.useEffect(() => {
     fetchData();
@@ -67,7 +122,7 @@ export function AdminPanel() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      await Promise.all([fetchCompanies(), fetchLeadsCount()]);
+      await Promise.all([fetchCompanies(), fetchLeadsCount(), fetchLeadCounts()]);
     } finally {
       setLoading(false);
     }
@@ -76,6 +131,51 @@ export function AdminPanel() {
   const fetchLeadsCount = async () => {
     const snapshot = await getCountFromServer(collection(db, 'leads'));
     setLeadsCount(snapshot.data().count);
+  };
+
+  const fetchLeadCounts = async () => {
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      // Get today's undistributed leads
+      const todayQuery = query(
+        collection(db, 'leads'),
+        where('timestamp', '>=', today.toISOString()),
+        where('timestamp', '<', tomorrow.toISOString())
+      );
+      const todaySnapshot = await getDocs(todayQuery);
+      const todayUndistributed = todaySnapshot.docs.filter(doc => !doc.data().companyId).length;
+      setTodayLeadsCount(todayUndistributed);
+
+      // Get yesterday's distributed leads
+      const yesterdayQuery = query(
+        collection(db, 'leads'),
+        where('timestamp', '>=', yesterday.toISOString()),
+        where('timestamp', '<', today.toISOString())
+      );
+      const yesterdaySnapshot = await getDocs(yesterdayQuery);
+      const yesterdayDistributed = yesterdaySnapshot.docs.filter(doc => doc.data().companyId).length;
+      setYesterdayLeadsCount(yesterdayDistributed);
+
+      // Get company lead counts
+      const leadCountsMap: Record<string, number> = {};
+      for (const company of companies) {
+        const companyLeadsQuery = query(
+          collection(db, 'leads'),
+          where('companyId', '==', company.id)
+        );
+        const companyLeadsSnapshot = await getDocs(companyLeadsQuery);
+        leadCountsMap[company.name] = companyLeadsSnapshot.docs.length;
+      }
+      setCompanyLeadCounts(leadCountsMap);
+    } catch (err) {
+      console.error('Error fetching lead counts:', err);
+    }
   };
 
   const fetchCompanies = async () => {
@@ -290,11 +390,15 @@ export function AdminPanel() {
       setError(null);
 
       let updatedData: Partial<Company> = {
-        ...formData,
+        name: formData.name,
         yearsExperience: parseInt(formData.yearsExperience) || 0,
         numberOfProjects: formData.numberOfProjects ? parseInt(formData.numberOfProjects) : 'Not Available',
+        location: formData.location,
+        ownerName: formData.ownerName,
         ownerPhone: `+91${formData.ownerPhone}`,
         projectsLink: formData.projectsLink.trim() || '',
+        subscriptionPlan: formData.subscriptionPlan as '1M' | '3M' | '6M' | '1Y',
+        subscriptionStartDate: formData.subscriptionStartDate,
         password: formData.password || editingCompany.password
       };
 
@@ -348,14 +452,16 @@ export function AdminPanel() {
       subscriptionStartDate: company.subscriptionStartDate,
       password: company.password
     });
+    
+    // Create dummy File objects for existing images
     if (company.projectImages) {
-      setProjectImages(
-        company.projectImages.map(url => ({
-          preview: url,
-          file: null
-        }))
-      );
+      const projectImageObjects: ProjectImage[] = company.projectImages.map(url => ({
+        preview: url,
+        file: new File([], 'placeholder', { type: 'image/jpeg' })
+      }));
+      setProjectImages(projectImageObjects);
     }
+    
     setPreviewUrl(company.logo);
     setIsEditModalOpen(true);
   };
@@ -391,6 +497,331 @@ export function AdminPanel() {
     }
   };
 
+  const fetchDistributionHistory = async () => {
+    try {
+      const historyQuery = query(
+        collection(db, 'distributionHistory'),
+        orderBy('timestamp', 'desc'),
+        limit(50)
+      );
+      const snapshot = await getDocs(historyQuery);
+      const history = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as DistributionHistory[];
+      setDistributionHistory(history);
+    } catch (err) {
+      console.error('Error fetching distribution history:', err);
+    }
+  };
+
+  const handleDistributeLeads = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      // Get all active companies
+      const activeCompanies = companies.filter(company => {
+        const subscription = calculateSubscriptionDetails(
+          company.subscriptionStartDate,
+          company.subscriptionPlan
+        );
+        return subscription.daysLeft > 0;
+      });
+
+      if (activeCompanies.length === 0) {
+        setError('No active companies found for lead distribution');
+        return;
+      }
+
+      console.log(`Found ${activeCompanies.length} active companies for distribution`);
+
+      // Get today's date boundaries
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      // First get all leads from today
+      const todayLeadsQuery = query(
+        collection(db, 'leads'),
+        where('timestamp', '>=', today.toISOString()),
+        where('timestamp', '<', tomorrow.toISOString())
+      );
+      const todayLeadsSnapshot = await getDocs(todayLeadsQuery);
+      
+      // Then filter for undistributed leads in memory and ensure proper typing
+      const todayLeads = todayLeadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        timestamp: doc.data().timestamp || new Date().toISOString(),
+        type: doc.data().type || 'consultation'
+      } as Lead)).filter(lead => !lead.companyId);
+
+      if (todayLeads.length === 0 && distributionOptions.distributeToday) {
+        setError('No new leads to distribute');
+        return;
+      }
+
+      console.log(`Found ${todayLeads.length} leads to distribute`);
+
+      // Calculate base distribution
+      const leadsPerCompany = Math.floor(todayLeads.length / activeCompanies.length);
+      const remainderLeads = todayLeads.length % activeCompanies.length;
+
+      console.log(`Base distribution: ${leadsPerCompany} leads per company`);
+      console.log(`Remainder leads: ${remainderLeads}`);
+
+      // Prepare batch update
+      const batch = writeBatch(db);
+
+      // Distribution tracking
+      const distributionSummary: Record<string, {
+        newLeads: number;
+        consultationLeads: number;
+        visitLeads: number;
+      }> = {};
+
+      // Initialize distribution summary for all companies
+      activeCompanies.forEach(company => {
+        distributionSummary[company.name] = {
+          newLeads: 0,
+          consultationLeads: 0,
+          visitLeads: 0
+        };
+      });
+
+      // Distribute leads
+      let leadIndex = 0;
+      for (let i = 0; i < activeCompanies.length; i++) {
+        const company = activeCompanies[i];
+        const extraLead = i < remainderLeads ? 1 : 0;
+        const companyLeadCount = leadsPerCompany + extraLead;
+
+        // Assign leads to this company
+        for (let j = 0; j < companyLeadCount && leadIndex < todayLeads.length; j++) {
+          const lead = todayLeads[leadIndex];
+          const leadRef = doc(db, 'leads', lead.id);
+          const now = new Date().toISOString();
+          batch.update(leadRef, {
+            companyId: company.id,
+            distributedAt: now
+          });
+
+          // Update distribution summary
+          distributionSummary[company.name].newLeads++;
+          if (lead.type === 'consultation') {
+            distributionSummary[company.name].consultationLeads++;
+          } else if (lead.type === 'visit') {
+            distributionSummary[company.name].visitLeads++;
+          }
+
+          leadIndex++;
+        }
+      }
+
+      console.log('Today\'s leads distribution summary:', distributionSummary);
+
+      // Get yesterday's leads
+      const yesterdayStart = new Date(today);
+      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+      
+      const yesterdayLeadsQuery = query(
+        collection(db, 'leads'),
+        where('timestamp', '>=', yesterdayStart.toISOString()),
+        where('timestamp', '<', today.toISOString())
+      );
+      const yesterdayLeadsSnapshot = await getDocs(yesterdayLeadsQuery);
+      const yesterdayLeads = yesterdayLeadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        timestamp: doc.data().timestamp || yesterdayStart.toISOString(),
+        type: doc.data().type || 'consultation'
+      } as Lead)).filter(lead => lead.companyId);
+
+      console.log(`Found ${yesterdayLeads.length} leads from yesterday to rotate`);
+
+      // Create company rotation map
+      const companyRotationMap = new Map<string, string>();
+      for (let i = 0; i < activeCompanies.length; i++) {
+        const nextIndex = (i + 1) % activeCompanies.length;
+        companyRotationMap.set(
+          activeCompanies[i].id,
+          activeCompanies[nextIndex].id
+        );
+      }
+
+      // Track rotations for summary
+      const rotationSummary: Record<string, {
+        rotatedLeads: number;
+        consultationLeads: number;
+        visitLeads: number;
+      }> = {};
+
+      // Initialize rotation summary for all companies
+      activeCompanies.forEach(company => {
+        rotationSummary[company.name] = {
+          rotatedLeads: 0,
+          consultationLeads: 0,
+          visitLeads: 0
+        };
+      });
+
+      // Rotate yesterday's leads
+      if (distributionOptions.distributeYesterday) {
+        for (const lead of yesterdayLeads) {
+          if (lead.companyId) {
+            const newCompanyId = companyRotationMap.get(lead.companyId);
+            if (newCompanyId) {
+              const leadRef = doc(db, 'leads', lead.id);
+              const now = new Date().toISOString();
+              batch.update(leadRef, {
+                companyId: newCompanyId,
+                distributedAt: now
+              });
+              
+              // Track rotation
+              const company = activeCompanies.find(c => c.id === newCompanyId);
+              if (company) {
+                rotationSummary[company.name].rotatedLeads++;
+                if (lead.type === 'consultation') {
+                  rotationSummary[company.name].consultationLeads++;
+                } else if (lead.type === 'visit') {
+                  rotationSummary[company.name].visitLeads++;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      console.log('Yesterday\'s leads rotation summary:', rotationSummary);
+
+      // Get expired leads
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() - 20);
+      
+      const expiredLeadsQuery = query(
+        collection(db, 'leads'),
+        where('timestamp', '<', expiryDate.toISOString())
+      );
+      const expiredLeadsSnapshot = await getDocs(expiredLeadsQuery);
+      
+      console.log(`Found ${expiredLeadsSnapshot.docs.length} expired leads to remove`);
+
+      // Remove expired leads
+      expiredLeadsSnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+
+      // Save distribution history
+      const historyRef = doc(collection(db, 'distributionHistory'));
+      const historyData = {
+        timestamp: new Date().toISOString(),
+        todayLeads: todayLeads.length,
+        rotatedLeads: yesterdayLeads.length,
+        expiredLeads: expiredLeadsSnapshot.docs.length,
+        activeCompanies: activeCompanies.length,
+        distributionSummary,
+        rotationSummary
+      };
+      batch.set(historyRef, historyData);
+
+      // Commit all changes
+      await batch.commit();
+
+      // Update results state
+      const results = {
+        todayLeads: todayLeads.length,
+        rotatedLeads: yesterdayLeads.length,
+        expiredLeads: expiredLeadsSnapshot.docs.length,
+        activeCompanies: activeCompanies.length,
+        distributionSummary,
+        rotationSummary
+      };
+      console.log('Setting distribution results:', results);
+      setDistributionResults(results);
+
+      // Show the modal with results
+      console.log('Opening distribution modal');
+      setShowDistributionModal(true);
+
+      // Refresh data
+      await Promise.all([
+        fetchLeadsCount(),
+        fetchDistributionHistory(),
+        fetchLeadCounts()
+      ]);
+
+    } catch (err: any) {
+      console.error('Error distributing leads:', err);
+      setError('Failed to distribute leads. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generateFakeCompany = (index: number): Omit<Company, 'id'> => {
+    const plans: Company['subscriptionPlan'][] = ['1M', '3M', '6M', '1Y'];
+    const today = new Date();
+    return {
+      name: `Test Company ${index}`,
+      logo: 'https://via.placeholder.com/150',
+      yearsExperience: Math.floor(Math.random() * 20) + 1,
+      numberOfProjects: Math.floor(Math.random() * 100),
+      location: `City ${index}`,
+      projectsLink: 'https://example.com',
+      ownerName: `Owner ${index}`,
+      ownerPhone: `+91${Math.floor(Math.random() * 9000000000) + 1000000000}`,
+      subscriptionPlan: plans[Math.floor(Math.random() * plans.length)],
+      subscriptionStartDate: today.toISOString().split('T')[0],
+      projectImages: [],
+      password: 'test123'
+    };
+  };
+
+  const generateFakeLead = () => {
+    const types: Lead['type'][] = ['consultation', 'visit'];
+    const now = new Date();
+    return {
+      name: `Lead ${Math.floor(Math.random() * 1000)}`,
+      phone: `+91${Math.floor(Math.random() * 9000000000) + 1000000000}`,
+      type: types[Math.floor(Math.random() * types.length)],
+      timestamp: now.toISOString(),
+      companyId: null
+    };
+  };
+
+  const handleAddFakeData = async (type: 'companies' | 'leads', quantity: number) => {
+    try {
+      setLoading(true);
+      const batch = writeBatch(db);
+
+      if (type === 'companies') {
+        for (let i = 0; i < quantity; i++) {
+          const companyData = generateFakeCompany(companies.length + i + 1);
+          const newCompanyRef = doc(collection(db, 'companies'));
+          batch.set(newCompanyRef, companyData);
+        }
+      } else {
+        for (let i = 0; i < quantity; i++) {
+          const leadData = generateFakeLead();
+          const newLeadRef = doc(collection(db, 'leads'));
+          batch.set(newLeadRef, leadData);
+        }
+      }
+
+      await batch.commit();
+      await fetchData();
+      alert(`Successfully added ${quantity} fake ${type}`);
+    } catch (err) {
+      console.error(`Error adding fake ${type}:`, err);
+      setError(`Failed to add fake ${type}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -407,6 +838,27 @@ export function AdminPanel() {
           <Building className="w-8 h-8 text-blue-600 mr-3" />
           <span className="text-3xl font-bold">{companies.length}</span>
         </div>
+        <div className="mt-4">
+          <div className="flex items-center space-x-2">
+            <input
+              type="number"
+              min="1"
+              max="100"
+              defaultValue="10"
+              id="companyQuantity"
+              className="w-20 px-2 py-1 border border-gray-300 rounded-md"
+            />
+            <button
+              onClick={() => {
+                const quantity = parseInt((document.getElementById('companyQuantity') as HTMLInputElement).value);
+                handleAddFakeData('companies', quantity);
+              }}
+              className="px-3 py-1 bg-blue-100 text-blue-600 rounded-md hover:bg-blue-200 text-sm"
+            >
+              Add Fake Companies
+            </button>
+          </div>
+        </div>
       </div>
       <div className="bg-white p-6 rounded-lg shadow-md">
         <h3 className="text-lg font-semibold mb-2">Total Leads</h3>
@@ -414,6 +866,105 @@ export function AdminPanel() {
           <Users className="w-8 h-8 text-green-600 mr-3" />
           <span className="text-3xl font-bold">{leadsCount}</span>
         </div>
+        <div className="mt-4">
+          <div className="flex items-center space-x-2">
+            <input
+              type="number"
+              min="1"
+              max="1000"
+              defaultValue="50"
+              id="leadQuantity"
+              className="w-20 px-2 py-1 border border-gray-300 rounded-md"
+            />
+            <button
+              onClick={() => {
+                const quantity = parseInt((document.getElementById('leadQuantity') as HTMLInputElement).value);
+                handleAddFakeData('leads', quantity);
+              }}
+              className="px-3 py-1 bg-green-100 text-green-600 rounded-md hover:bg-green-200 text-sm"
+            >
+              Add Fake Leads
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className="col-span-2 space-y-4">
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold">Lead Distribution Options</h3>
+            <button
+              onClick={() => {
+                fetchDistributionHistory();
+                setShowHistoryModal(true);
+              }}
+              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 flex items-center space-x-2"
+            >
+              <Calendar className="w-4 h-4" />
+              <span>View Distribution History</span>
+            </button>
+          </div>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={distributionOptions.distributeToday}
+                    onChange={(e) => setDistributionOptions(prev => ({
+                      ...prev,
+                      distributeToday: e.target.checked
+                    }))}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>Distribute Today's Leads</span>
+                </label>
+                <p className="text-sm text-gray-500 ml-6">Distribute new leads among active companies</p>
+              </div>
+              <span className="text-sm font-medium text-blue-600">
+                {todayLeadsCount || 0} leads available
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={distributionOptions.distributeYesterday}
+                    onChange={(e) => setDistributionOptions(prev => ({
+                      ...prev,
+                      distributeYesterday: e.target.checked
+                    }))}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>Rotate Yesterday's Leads</span>
+                </label>
+                <p className="text-sm text-gray-500 ml-6">Rotate existing leads between companies</p>
+              </div>
+              <span className="text-sm font-medium text-blue-600">
+                {yesterdayLeadsCount || 0} leads to rotate
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={handleDistributeLeads}
+          disabled={loading || (!distributionOptions.distributeToday && !distributionOptions.distributeYesterday)}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition-colors flex items-center justify-center space-x-2 disabled:opacity-50"
+        >
+          {loading ? (
+            <>
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span>Distributing Leads...</span>
+            </>
+          ) : (
+            <>
+              <Users className="w-5 h-5" />
+              <span>Distribute Leads</span>
+            </>
+          )}
+        </button>
       </div>
     </div>
   );
@@ -659,7 +1210,6 @@ export function AdminPanel() {
                         }}
                         pattern="\d{10}"
                         title="Please enter a valid 10-digit phone number"
-                        placeholder="Enter 10-digit number"
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-r-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
@@ -851,9 +1401,9 @@ export function AdminPanel() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
+    <div className="min-h-screen bg-gray-50">
       {/* Sidebar */}
-      <div className="w-64 bg-white shadow-md">
+      <div className="fixed top-0 left-0 h-full w-64 bg-white shadow-md z-10 overflow-y-auto">
         <div className="p-4">
           <h2 className="text-xl font-bold text-gray-800 mb-6">Admin Panel</h2>
           <nav className="space-y-2">
@@ -925,7 +1475,7 @@ export function AdminPanel() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 p-8">
+      <div className="ml-64 min-h-screen bg-gray-50 p-8">
         {renderContent()}
       </div>
 
@@ -1117,9 +1667,7 @@ export function AdminPanel() {
                           )}
                         </button>
                       </div>
-                      <p className="mt-1 text-xs text-gray-500">
-                        {formData.password ? 'Minimum 6 characters' : 'Leave blank to keep current password'}
-                      </p>
+                      <p className="mt-1 text-xs text-gray-500">Minimum 6 characters</p>
                     </div>
                   </div>
                 </div>
@@ -1242,6 +1790,171 @@ export function AdminPanel() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDistributionModal && distributionResults && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold text-gray-900">Lead Distribution Summary</h2>
+                <button
+                  onClick={() => setShowDistributionModal(false)}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                {/* Summary Cards */}
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-blue-50 p-4 rounded-lg">
+                    <h3 className="text-sm font-medium text-blue-800 mb-2">Today's Distribution</h3>
+                    <p className="text-2xl font-bold text-blue-600">{distributionResults.todayLeads}</p>
+                    <p className="text-sm text-blue-600">new leads distributed</p>
+                  </div>
+                  <div className="bg-green-50 p-4 rounded-lg">
+                    <h3 className="text-sm font-medium text-green-800 mb-2">Yesterday's Rotation</h3>
+                    <p className="text-2xl font-bold text-green-600">{distributionResults.rotatedLeads}</p>
+                    <p className="text-sm text-green-600">leads rotated</p>
+                  </div>
+                  <div className="bg-red-50 p-4 rounded-lg">
+                    <h3 className="text-sm font-medium text-red-800 mb-2">Cleanup</h3>
+                    <p className="text-2xl font-bold text-red-600">{distributionResults.expiredLeads}</p>
+                    <p className="text-sm text-red-600">expired leads removed</p>
+                  </div>
+                </div>
+
+                {/* Detailed Distribution Table */}
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Company</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Previous Leads</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">New Leads</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Consultations</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visits</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rotated</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {Object.entries(distributionResults.distributionSummary).map(([company, data]) => {
+                        const rotationData = distributionResults.rotationSummary[company] || {
+                          rotatedLeads: 0,
+                          consultationLeads: 0,
+                          visitLeads: 0
+                        };
+                        const previousLeads = companyLeadCounts[company] || 0;
+                        const totalLeads = previousLeads + data.newLeads + rotationData.rotatedLeads;
+                        
+                        return (
+                          <tr key={company}>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{company}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{previousLeads}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              <span className="text-green-600">+{data.newLeads}</span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {data.consultationLeads + rotationData.consultationLeads}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {data.visitLeads + rotationData.visitLeads}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              <span className="text-blue-600">+{rotationData.rotatedLeads}</span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{totalLeads}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <button
+                  onClick={() => setShowDistributionModal(false)}
+                  className="w-full py-2 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showHistoryModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-6xl max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold text-gray-900">Lead Distribution History</h2>
+                <button
+                  onClick={() => setShowHistoryModal(false)}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                {distributionHistory.map((record) => (
+                  <div key={record.id} className="border rounded-lg p-4">
+                    <div className="flex justify-between items-center mb-4">
+                      <h3 className="font-medium text-gray-900">
+                        Distribution on {new Date(record.timestamp).toLocaleString()}
+                      </h3>
+                      <div className="flex space-x-4 text-sm">
+                        <span className="text-blue-600">{record.todayLeads} new leads</span>
+                        <span className="text-green-600">{record.rotatedLeads} rotated</span>
+                        <span className="text-red-600">{record.expiredLeads} expired</span>
+                      </div>
+                    </div>
+
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Company</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">New Leads</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Consultations</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Visits</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Rotated</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {Object.entries(record.distributionSummary).map(([company, data]) => (
+                          <tr key={company}>
+                            <td className="px-4 py-2 text-sm font-medium text-gray-900">{company}</td>
+                            <td className="px-4 py-2 text-sm text-gray-500">{data.newLeads}</td>
+                            <td className="px-4 py-2 text-sm text-gray-500">{data.consultationLeads}</td>
+                            <td className="px-4 py-2 text-sm text-gray-500">{data.visitLeads}</td>
+                            <td className="px-4 py-2 text-sm text-gray-500">
+                              {record.rotationSummary[company]?.rotatedLeads || 0}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-6">
+                <button
+                  onClick={() => setShowHistoryModal(false)}
+                  className="w-full py-2 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>
