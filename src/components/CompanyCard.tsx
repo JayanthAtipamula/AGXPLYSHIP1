@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Calendar, MapPin, Briefcase, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
+import { Calendar, MapPin, Briefcase, ExternalLink, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { ContactForm } from './ContactForm';
 
 interface CompanyCardProps {
@@ -164,12 +164,31 @@ export function CompanyCard({
       </div>
 
       {(showConsultationForm || showBookingForm) && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowConsultationForm(false);
+              setShowBookingForm(false);
+            }
+          }}
+        >
           <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
             <div className="p-6">
-              <h3 className="text-xl font-semibold mb-4">
-                {showConsultationForm ? 'Get Free Consultation' : 'Book a Visit'}
-              </h3>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-semibold">
+                  {showConsultationForm ? 'Get Free Consultation' : 'Book a Visit'}
+                </h3>
+                <button
+                  onClick={() => {
+                    setShowConsultationForm(false);
+                    setShowBookingForm(false);
+                  }}
+                  className="text-gray-400 hover:text-gray-500 transition-colors"
+                >
+                  <X className="h-6 w-6" />
+                </button>
+              </div>
               
               <ContactForm 
                 onSubmit={() => {

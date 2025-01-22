@@ -2,11 +2,14 @@ import * as React from 'react';
 import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc, query, where, writeBatch, orderBy, limit } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
-import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff, Layout } from 'lucide-react';
+import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff, Layout, LogOut } from 'lucide-react';
 import { LeadsView } from '../components/LeadsView';
 import { ExpiringPlans } from '../components/ExpiringPlans';
 import { CreatePage } from './CreatePage';
 import { LeadDistribution } from '../components/LeadDistribution';
+import { signOut } from 'firebase/auth';
+import { auth } from '../lib/firebase';
+import { useNavigate } from 'react-router-dom';
 
 interface Company {
   id: string;
@@ -114,6 +117,7 @@ export function AdminPanel() {
   const [companyLeadCounts, setCompanyLeadCounts] = React.useState<Record<string, number>>({});
   const [showHistoryModal, setShowHistoryModal] = React.useState(false);
   const [distributionHistory, setDistributionHistory] = React.useState<DistributionHistory[]>([]);
+  const navigate = useNavigate();
 
   React.useEffect(() => {
     fetchData();
@@ -822,6 +826,16 @@ export function AdminPanel() {
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      localStorage.removeItem('isAdmin');
+      navigate('/admin/login');
+    } catch (err) {
+      console.error('Error signing out:', err);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -1469,6 +1483,13 @@ export function AdminPanel() {
             >
               <Layout className="w-5 h-5" />
               <span>Lead Distribution</span>
+            </button>
+            <button
+              onClick={handleLogout}
+              className="w-full flex items-center space-x-2 px-4 py-2 rounded-md text-red-600 hover:bg-red-50"
+            >
+              <LogOut className="w-5 h-5" />
+              <span>Logout</span>
             </button>
           </nav>
         </div>
