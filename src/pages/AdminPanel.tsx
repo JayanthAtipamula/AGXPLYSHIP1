@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc, query, where, writeBatch, orderBy, limit } from 'firebase/firestore';
+import { collection, addDoc, getDocs, deleteDoc, doc, getCountFromServer, updateDoc, query, where, writeBatch, orderBy, limit, getDoc, setDoc, arrayUnion } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
 import { Loader2, Trash2, Upload, LayoutDashboard, Building, UserPlus, Users, X, Calendar, Edit, AlertTriangle, Eye, EyeOff, Layout, LogOut } from 'lucide-react';
@@ -29,20 +29,17 @@ interface Company {
 
 interface Lead {
   id: string;
-  name: string;
-  phone: string;
   type: 'consultation' | 'visit';
-  timestamp: string;
-  companyId?: string;
+  status: 'active' | 'archived';
+  companyId: string | null;
   distributedAt?: string;
+  previousCompanyIds?: string[];
+  rotationCount?: number;
 }
 
-interface DistributionHistory {
-  id: string;
-  timestamp: string;
-  todayLeads: number;
+interface DistributionResults {
   rotatedLeads: number;
-  expiredLeads: number;
+  archivedLeads: number;
   activeCompanies: number;
   distributionSummary: Record<string, {
     newLeads: number;
@@ -56,11 +53,59 @@ interface DistributionHistory {
   }>;
 }
 
+interface DistributionHistory {
+  id: string;
+  timestamp: string;
+  rotatedLeads: number;
+  archivedLeads: number;
+  activeCompanies: number;
+  distributionSummary: Record<string, {
+    newLeads: number;
+    consultationLeads: number;
+    visitLeads: number;
+  }>;
+  rotationSummary: Record<string, {
+    rotatedLeads: number;
+    consultationLeads: number;
+    visitLeads: number;
+  }>;
+  settings: {
+    rotationPeriod: number;
+    cycleDays: number;
+  };
+}
+
 type ActiveView = 'dashboard' | 'companies' | 'addCompany' | 'leads' | 'expiring' | 'createPage' | 'leadDistribution';
 
 interface ProjectImage {
   file: File;
   preview: string;
+}
+
+interface Settings {
+  rotation_period: number;  // n days - how many days back to look for leads to rotate
+  cycle_days: number;      // N days - total rotation cycle before archiving
+}
+
+interface CompanyLeadCount {
+  total: number;
+  consultation: number;
+  visit: number;
+}
+
+interface CompanyDistribution {
+  [companyId: string]: CompanyLeadCount;
+}
+
+interface DistributionSummaryData {
+    newLeads: number;
+    consultationLeads: number;
+    visitLeads: number;
+  totalLeads?: number;
+}
+
+interface DistributionSummary {
+  [company: string]: DistributionSummaryData;
 }
 
 export function AdminPanel() {
@@ -92,91 +137,104 @@ export function AdminPanel() {
   const [isEditModalOpen, setIsEditModalOpen] = React.useState(false);
   const [showPassword, setShowPassword] = React.useState(false);
   const [showDistributionModal, setShowDistributionModal] = React.useState(false);
-  const [distributionResults, setDistributionResults] = React.useState<{
-    todayLeads: number;
-    rotatedLeads: number;
-    expiredLeads: number;
-    activeCompanies: number;
-    distributionSummary: Record<string, {
-      newLeads: number;
-      consultationLeads: number;
-      visitLeads: number;
-    }>;
-    rotationSummary: Record<string, {
-      rotatedLeads: number;
-      consultationLeads: number;
-      visitLeads: number;
-    }>;
-  } | null>(null);
+  const [distributionResults, setDistributionResults] = React.useState<DistributionResults | null>(null);
   const [distributionOptions, setDistributionOptions] = React.useState({
     distributeToday: true,
     distributeYesterday: true
   });
   const [todayLeadsCount, setTodayLeadsCount] = React.useState(0);
   const [yesterdayLeadsCount, setYesterdayLeadsCount] = React.useState(0);
-  const [companyLeadCounts, setCompanyLeadCounts] = React.useState<Record<string, number>>({});
+  const [companyLeadCounts, setCompanyLeadCounts] = React.useState<CompanyDistribution>({});
   const [showHistoryModal, setShowHistoryModal] = React.useState(false);
   const [distributionHistory, setDistributionHistory] = React.useState<DistributionHistory[]>([]);
+  const [rotationPeriod, setRotationPeriod] = React.useState(2);
+  const [cycleDays, setCycleDays] = React.useState(10);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = React.useState(false);
+  const [savingSettings, setSavingSettings] = React.useState(false);
   const navigate = useNavigate();
+  // Add new state for selected history items
+  const [selectedHistory, setSelectedHistory] = React.useState<Set<string>>(new Set());
+  const [deletingHistory, setDeletingHistory] = React.useState(false);
+  // Add new state for company distribution modal
+  const [showCompanyDistributionModal, setShowCompanyDistributionModal] = React.useState(false);
 
   React.useEffect(() => {
     fetchData();
+    // Set up an interval to refresh the counts every minute
+    const interval = setInterval(fetchLeadsCount, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   const fetchData = async () => {
     try {
       setLoading(true);
-      await Promise.all([fetchCompanies(), fetchLeadsCount(), fetchLeadCounts()]);
+      await Promise.all([fetchCompanies(), fetchLeadsCount(), fetchLeadCounts(), fetchSettings()]);
     } finally {
       setLoading(false);
     }
   };
 
   const fetchLeadsCount = async () => {
-    const snapshot = await getCountFromServer(collection(db, 'leads'));
-    setLeadsCount(snapshot.data().count);
-  };
-
-  const fetchLeadCounts = async () => {
     try {
+      // Get today's date range
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
 
-      // Get today's undistributed leads
+      // Get previous n days date
+      const nDaysAgo = new Date(today);
+      nDaysAgo.setDate(nDaysAgo.getDate() - rotationPeriod);
+
+      // Query for today's undistributed leads
+      const leadsRef = collection(db, 'leads');
       const todayQuery = query(
-        collection(db, 'leads'),
+        leadsRef,
         where('timestamp', '>=', today.toISOString()),
-        where('timestamp', '<', tomorrow.toISOString())
+        where('timestamp', '<', tomorrow.toISOString()),
+        where('companyId', '==', null)
       );
-      const todaySnapshot = await getDocs(todayQuery);
-      const todayUndistributed = todaySnapshot.docs.filter(doc => !doc.data().companyId).length;
-      setTodayLeadsCount(todayUndistributed);
+      const todaySnapshot = await getCountFromServer(todayQuery);
+      setTodayLeadsCount(todaySnapshot.data().count);
 
-      // Get yesterday's distributed leads
-      const yesterdayQuery = query(
-        collection(db, 'leads'),
-        where('timestamp', '>=', yesterday.toISOString()),
-        where('timestamp', '<', today.toISOString())
+      // Query for previous n days leads
+      const previousDaysQuery = query(
+        leadsRef,
+        where('timestamp', '>=', nDaysAgo.toISOString()),
+        where('timestamp', '<', today.toISOString()),
+        where('status', '==', 'active')
       );
-      const yesterdaySnapshot = await getDocs(yesterdayQuery);
-      const yesterdayDistributed = yesterdaySnapshot.docs.filter(doc => doc.data().companyId).length;
-      setYesterdayLeadsCount(yesterdayDistributed);
+      const previousDaysSnapshot = await getCountFromServer(previousDaysQuery);
+      setYesterdayLeadsCount(previousDaysSnapshot.data().count);
 
-      // Get company lead counts
-      const leadCountsMap: Record<string, number> = {};
-      for (const company of companies) {
-        const companyLeadsQuery = query(
-          collection(db, 'leads'),
-          where('companyId', '==', company.id)
-        );
-        const companyLeadsSnapshot = await getDocs(companyLeadsQuery);
-        leadCountsMap[company.name] = companyLeadsSnapshot.docs.length;
-      }
-      setCompanyLeadCounts(leadCountsMap);
+      // Get total leads count
+      const totalSnapshot = await getCountFromServer(collection(db, 'leads'));
+      setLeadsCount(totalSnapshot.data().count);
+    } catch (err) {
+      console.error('Error fetching leads count:', err);
+    }
+  };
+
+  const fetchLeadCounts = async () => {
+    try {
+      const counts: CompanyDistribution = {};
+      const leadsRef = collection(db, 'leads');
+      const q = query(leadsRef, where('status', '==', 'active'));
+      const querySnapshot = await getDocs(q);
+      
+      querySnapshot.forEach(doc => {
+        const lead = doc.data();
+        if (lead.companyId) {
+          if (!counts[lead.companyId]) {
+            counts[lead.companyId] = { total: 0, consultation: 0, visit: 0 };
+          }
+          counts[lead.companyId].total++;
+          if (lead.type === 'consultation') counts[lead.companyId].consultation++;
+          if (lead.type === 'visit') counts[lead.companyId].visit++;
+        }
+      });
+      
+      setCompanyLeadCounts(counts);
     } catch (err) {
       console.error('Error fetching lead counts:', err);
     }
@@ -522,9 +580,9 @@ export function AdminPanel() {
   const handleDistributeLeads = async () => {
     try {
       setLoading(true);
-      setError(null);
-
-      // Get all active companies
+      const batch = writeBatch(db);
+      
+      // Get active companies
       const activeCompanies = companies.filter(company => {
         const subscription = calculateSubscriptionDetails(
           company.subscriptionStartDate,
@@ -534,136 +592,64 @@ export function AdminPanel() {
       });
 
       if (activeCompanies.length === 0) {
-        setError('No active companies found for lead distribution');
-        return;
+        throw new Error('No active companies available for distribution');
       }
 
-      console.log(`Found ${activeCompanies.length} active companies for distribution`);
-
-      // Get today's date boundaries
+      // Get today's undistributed leads
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
-      // First get all leads from today
       const todayLeadsQuery = query(
         collection(db, 'leads'),
         where('timestamp', '>=', today.toISOString()),
-        where('timestamp', '<', tomorrow.toISOString())
+        where('timestamp', '<', tomorrow.toISOString()),
+        where('companyId', '==', null)
       );
       const todayLeadsSnapshot = await getDocs(todayLeadsQuery);
+      const todayLeads = todayLeadsSnapshot.docs;
+
+      // Get leads to rotate (from previous n days)
+      const nDaysAgo = new Date(today);
+      nDaysAgo.setDate(nDaysAgo.getDate() - rotationPeriod);
       
-      // Then filter for undistributed leads in memory and ensure proper typing
-      const todayLeads = todayLeadsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        timestamp: doc.data().timestamp || new Date().toISOString(),
-        type: doc.data().type || 'consultation'
-      } as Lead)).filter(lead => !lead.companyId);
+      const rotateLeadsQuery = query(
+        collection(db, 'leads'),
+        where('timestamp', '>=', nDaysAgo.toISOString()),
+        where('timestamp', '<', today.toISOString()),
+        where('status', '==', 'active')
+      );
+      const rotateLeadsSnapshot = await getDocs(rotateLeadsQuery);
+      const leadsToRotate = rotateLeadsSnapshot.docs;
 
-      if (todayLeads.length === 0 && distributionOptions.distributeToday) {
-        setError('No new leads to distribute');
-        return;
-      }
+      // Initialize distribution summary
+      const distributionSummary = {
+        totalLeads: todayLeads.length,
+        newLeads: todayLeads.length,
+        consultationLeads: todayLeads.filter(doc => (doc.data() as Lead).type === 'consultation').length,
+        visitLeads: todayLeads.filter(doc => (doc.data() as Lead).type === 'visit').length
+      };
 
-      console.log(`Found ${todayLeads.length} leads to distribute`);
-
-      // Calculate base distribution
-      const leadsPerCompany = Math.floor(todayLeads.length / activeCompanies.length);
-      const remainderLeads = todayLeads.length % activeCompanies.length;
-
-      console.log(`Base distribution: ${leadsPerCompany} leads per company`);
-      console.log(`Remainder leads: ${remainderLeads}`);
-
-      // Prepare batch update
-      const batch = writeBatch(db);
-
-      // Distribution tracking
-      const distributionSummary: Record<string, {
+      const companyDistribution: Record<string, {
         newLeads: number;
         consultationLeads: number;
         visitLeads: number;
       }> = {};
-
-      // Initialize distribution summary for all companies
-      activeCompanies.forEach(company => {
-        distributionSummary[company.name] = {
-          newLeads: 0,
-          consultationLeads: 0,
-          visitLeads: 0
-        };
-      });
-
-      // Distribute leads
-      let leadIndex = 0;
-      for (let i = 0; i < activeCompanies.length; i++) {
-        const company = activeCompanies[i];
-        const extraLead = i < remainderLeads ? 1 : 0;
-        const companyLeadCount = leadsPerCompany + extraLead;
-
-        // Assign leads to this company
-        for (let j = 0; j < companyLeadCount && leadIndex < todayLeads.length; j++) {
-          const lead = todayLeads[leadIndex];
-          const leadRef = doc(db, 'leads', lead.id);
-          const now = new Date().toISOString();
-          batch.update(leadRef, {
-            companyId: company.id,
-            distributedAt: now
-          });
-
-          // Update distribution summary
-          distributionSummary[company.name].newLeads++;
-          if (lead.type === 'consultation') {
-            distributionSummary[company.name].consultationLeads++;
-          } else if (lead.type === 'visit') {
-            distributionSummary[company.name].visitLeads++;
-          }
-
-          leadIndex++;
-        }
-      }
-
-      console.log('Today\'s leads distribution summary:', distributionSummary);
-
-      // Get yesterday's leads
-      const yesterdayStart = new Date(today);
-      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
       
-      const yesterdayLeadsQuery = query(
-        collection(db, 'leads'),
-        where('timestamp', '>=', yesterdayStart.toISOString()),
-        where('timestamp', '<', today.toISOString())
-      );
-      const yesterdayLeadsSnapshot = await getDocs(yesterdayLeadsQuery);
-      const yesterdayLeads = yesterdayLeadsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        timestamp: doc.data().timestamp || yesterdayStart.toISOString(),
-        type: doc.data().type || 'consultation'
-      } as Lead)).filter(lead => lead.companyId);
-
-      console.log(`Found ${yesterdayLeads.length} leads from yesterday to rotate`);
-
-      // Create company rotation map
-      const companyRotationMap = new Map<string, string>();
-      for (let i = 0; i < activeCompanies.length; i++) {
-        const nextIndex = (i + 1) % activeCompanies.length;
-        companyRotationMap.set(
-          activeCompanies[i].id,
-          activeCompanies[nextIndex].id
-        );
-      }
-
-      // Track rotations for summary
       const rotationSummary: Record<string, {
         rotatedLeads: number;
         consultationLeads: number;
         visitLeads: number;
       }> = {};
 
-      // Initialize rotation summary for all companies
+      // Initialize summaries for each company
       activeCompanies.forEach(company => {
+        companyDistribution[company.name] = {
+          newLeads: 0,
+          consultationLeads: 0,
+          visitLeads: 0
+        };
         rotationSummary[company.name] = {
           rotatedLeads: 0,
           consultationLeads: 0,
@@ -671,95 +657,109 @@ export function AdminPanel() {
         };
       });
 
-      // Rotate yesterday's leads
-      if (distributionOptions.distributeYesterday) {
-        for (const lead of yesterdayLeads) {
-          if (lead.companyId) {
-            const newCompanyId = companyRotationMap.get(lead.companyId);
-            if (newCompanyId) {
-              const leadRef = doc(db, 'leads', lead.id);
-              const now = new Date().toISOString();
-              batch.update(leadRef, {
-                companyId: newCompanyId,
-                distributedAt: now
-              });
-              
-              // Track rotation
-              const company = activeCompanies.find(c => c.id === newCompanyId);
-              if (company) {
-                rotationSummary[company.name].rotatedLeads++;
-                if (lead.type === 'consultation') {
-                  rotationSummary[company.name].consultationLeads++;
-                } else if (lead.type === 'visit') {
-                  rotationSummary[company.name].visitLeads++;
-                }
-              }
-            }
-          }
+      // Distribute today's leads
+      let companyIndex = 0;
+      todayLeads.forEach(doc => {
+        const lead = doc.data() as Lead;
+        const company = activeCompanies[companyIndex];
+        
+        batch.update(doc.ref, {
+          companyId: company.id,
+          distributedAt: new Date().toISOString(),
+          status: 'active',
+          previousCompanyIds: [company.id],
+          rotationCount: 0
+        });
+
+        companyDistribution[company.name].newLeads++;
+        if (lead.type === 'consultation') {
+          companyDistribution[company.name].consultationLeads++;
+        } else {
+          companyDistribution[company.name].visitLeads++;
         }
-      }
 
-      console.log('Yesterday\'s leads rotation summary:', rotationSummary);
-
-      // Get expired leads
-      const expiryDate = new Date();
-      expiryDate.setDate(expiryDate.getDate() - 20);
-      
-      const expiredLeadsQuery = query(
-        collection(db, 'leads'),
-        where('timestamp', '<', expiryDate.toISOString())
-      );
-      const expiredLeadsSnapshot = await getDocs(expiredLeadsQuery);
-      
-      console.log(`Found ${expiredLeadsSnapshot.docs.length} expired leads to remove`);
-
-      // Remove expired leads
-      expiredLeadsSnapshot.docs.forEach(doc => {
-        batch.delete(doc.ref);
+        companyIndex = (companyIndex + 1) % activeCompanies.length;
       });
 
-      // Save distribution history
-      const historyRef = doc(collection(db, 'distributionHistory'));
-      const historyData = {
-        timestamp: new Date().toISOString(),
-        todayLeads: todayLeads.length,
-        rotatedLeads: yesterdayLeads.length,
-        expiredLeads: expiredLeadsSnapshot.docs.length,
-        activeCompanies: activeCompanies.length,
-        distributionSummary,
-        rotationSummary
-      };
-      batch.set(historyRef, historyData);
+      // Rotate previous leads
+      leadsToRotate.forEach(doc => {
+        const lead = doc.data() as Lead;
+        const previousCompanyIds = lead.previousCompanyIds || [];
+        
+        // Find next eligible company
+        const eligibleCompanies = activeCompanies.filter(company => 
+          !previousCompanyIds.includes(company.id)
+        );
+
+        if (eligibleCompanies.length > 0) {
+          // Rotate to next company
+          const nextCompany = eligibleCompanies[0];
+          batch.update(doc.ref, {
+            companyId: nextCompany.id,
+            distributedAt: new Date().toISOString(),
+            previousCompanyIds: arrayUnion(nextCompany.id),
+            rotationCount: (lead.rotationCount || 0) + 1
+          });
+
+          rotationSummary[nextCompany.name].rotatedLeads++;
+          if (lead.type === 'consultation') {
+            rotationSummary[nextCompany.name].consultationLeads++;
+          } else {
+            rotationSummary[nextCompany.name].visitLeads++;
+          }
+        } else {
+          // Archive lead if no eligible companies left
+          batch.update(doc.ref, {
+            status: 'archived',
+            companyId: null
+          });
+        }
+      });
 
       // Commit all changes
       await batch.commit();
 
-      // Update results state
-      const results = {
-        todayLeads: todayLeads.length,
-        rotatedLeads: yesterdayLeads.length,
-        expiredLeads: expiredLeadsSnapshot.docs.length,
+      // Save distribution history
+      const historyRef = doc(collection(db, 'distributionHistory'));
+      await setDoc(historyRef, {
+        id: historyRef.id,
+        timestamp: new Date().toISOString(),
+        rotatedLeads: leadsToRotate.length,
+        archivedLeads: leadsToRotate.filter(doc => {
+          const lead = doc.data() as Lead;
+          const previousCompanyIds = lead.previousCompanyIds || [];
+          return previousCompanyIds.length >= activeCompanies.length;
+        }).length,
         activeCompanies: activeCompanies.length,
-        distributionSummary,
+        distributionSummary: companyDistribution,
+        rotationSummary,
+        settings: {
+          rotationPeriod,
+          cycleDays
+        }
+      });
+
+      // Update UI
+      const results: DistributionResults = {
+        rotatedLeads: leadsToRotate.length,
+        archivedLeads: leadsToRotate.filter(doc => {
+          const lead = doc.data() as Lead;
+          const previousCompanyIds = lead.previousCompanyIds || [];
+          return previousCompanyIds.length >= activeCompanies.length;
+        }).length,
+        activeCompanies: activeCompanies.length,
+        distributionSummary: companyDistribution,
         rotationSummary
       };
-      console.log('Setting distribution results:', results);
+
       setDistributionResults(results);
-
-      // Show the modal with results
-      console.log('Opening distribution modal');
       setShowDistributionModal(true);
-
+      
       // Refresh data
-      await Promise.all([
-        fetchLeadsCount(),
-        fetchDistributionHistory(),
-        fetchLeadCounts()
-      ]);
-
-    } catch (err: any) {
+      await fetchData();
+    } catch (err) {
       console.error('Error distributing leads:', err);
-      setError('Failed to distribute leads. Please try again.');
+      setError(err instanceof Error ? err.message : 'Failed to distribute leads. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -836,6 +836,134 @@ export function AdminPanel() {
     }
   };
 
+  const fetchSettings = async () => {
+    try {
+      const settingsRef = doc(db, 'settings', 'distribution');
+      const settingsSnap = await getDoc(settingsRef);
+      
+      if (settingsSnap.exists()) {
+        const settings = settingsSnap.data() as Settings;
+        setRotationPeriod(settings.rotation_period);
+        setCycleDays(settings.cycle_days);
+      } else {
+        // Create default settings if they don't exist
+        await setDoc(settingsRef, { 
+          rotation_period: 2,
+          cycle_days: 10
+        });
+      }
+    } catch (err) {
+      console.error('Error fetching settings:', err);
+    }
+  };
+
+  const updateSettings = async (period: number, cycle: number) => {
+    try {
+      setSavingSettings(true);
+      const settingsRef = doc(db, 'settings', 'distribution');
+      await updateDoc(settingsRef, { 
+        rotation_period: period,
+        cycle_days: cycle
+      });
+      setRotationPeriod(period);
+      setCycleDays(cycle);
+      setIsSettingsModalOpen(false);
+      // Refresh data to ensure everything is in sync
+      await fetchData();
+    } catch (err) {
+      console.error('Error updating settings:', err);
+      setError('Failed to update settings');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // Add function to handle history deletion
+  const handleDeleteHistory = async () => {
+    try {
+      setDeletingHistory(true);
+      const batch = writeBatch(db);
+      
+      selectedHistory.forEach((id) => {
+        const historyRef = doc(db, 'distributionHistory', id);
+        batch.delete(historyRef);
+      });
+      
+      await batch.commit();
+      await fetchDistributionHistory();
+      setSelectedHistory(new Set());
+    } catch (err) {
+      console.error('Error deleting history:', err);
+      setError('Failed to delete history items');
+    } finally {
+      setDeletingHistory(false);
+    }
+  };
+
+  // Add function to toggle all history selection
+  const toggleSelectAllHistory = () => {
+    if (selectedHistory.size === distributionHistory.length) {
+      setSelectedHistory(new Set());
+    } else {
+      setSelectedHistory(new Set(distributionHistory.map(record => record.id)));
+    }
+  };
+
+  const CompanyDistributionModal = () => {
+    if (!showCompanyDistributionModal) return null;
+
+    const activeCompanies = companies.filter(company => {
+      const subscription = calculateSubscriptionDetails(
+        company.subscriptionStartDate,
+        company.subscriptionPlan
+      );
+      return subscription.daysLeft > 0;
+    });
+
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold">Company Lead Distribution</h3>
+            <button
+              onClick={() => setShowCompanyDistributionModal(false)}
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="space-y-4">
+            {activeCompanies.map(company => (
+                <div key={company.id} className="border rounded-lg p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <img src={company.logo} alt={company.name} className="w-12 h-12 object-contain" />
+                      <div>
+                        <h4 className="font-medium">{company.name}</h4>
+                        <p className="text-sm text-gray-600">
+                        {calculateSubscriptionDetails(
+                          company.subscriptionStartDate,
+                          company.subscriptionPlan
+                        ).daysLeft} days left
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-lg font-semibold text-blue-600">
+                        {companyLeadCounts[company.id]?.total || 0}
+                      </p>
+                      <p className="text-sm text-gray-600">Active Leads</p>
+                    </div>
+                  </div>
+                </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -845,140 +973,277 @@ export function AdminPanel() {
   }
 
   const renderDashboard = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div className="space-y-6">
+      {/* Distribution Controls - Moving to top for prominence */}
       <div className="bg-white p-6 rounded-lg shadow-md">
-        <h3 className="text-lg font-semibold mb-2">Total Companies</h3>
-        <div className="flex items-center">
-          <Building className="w-8 h-8 text-blue-600 mr-3" />
-          <span className="text-3xl font-bold">{companies.length}</span>
-        </div>
-        <div className="mt-4">
-          <div className="flex items-center space-x-2">
-            <input
-              type="number"
-              min="1"
-              max="100"
-              defaultValue="10"
-              id="companyQuantity"
-              className="w-20 px-2 py-1 border border-gray-300 rounded-md"
-            />
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h3 className="text-xl font-semibold">Lead Distribution Controls</h3>
+            <p className="text-sm text-gray-600 mt-1">Configure and manage lead distribution settings</p>
+          </div>
+          <div className="flex items-center space-x-4">
+            <div className="text-right">
+              <div className="text-sm text-gray-600">Current Rotation Period</div>
+              <div className="text-2xl font-bold text-blue-600">{rotationPeriod} days</div>
+            </div>
             <button
-              onClick={() => {
-                const quantity = parseInt((document.getElementById('companyQuantity') as HTMLInputElement).value);
-                handleAddFakeData('companies', quantity);
-              }}
-              className="px-3 py-1 bg-blue-100 text-blue-600 rounded-md hover:bg-blue-200 text-sm"
+              onClick={() => setIsSettingsModalOpen(true)}
+              className="px-4 py-2 bg-blue-100 text-blue-600 rounded-md hover:bg-blue-200 flex items-center space-x-2"
             >
-              Add Fake Companies
+              <Edit className="w-4 h-4" />
+              <span>Change Period</span>
             </button>
           </div>
         </div>
-      </div>
-      <div className="bg-white p-6 rounded-lg shadow-md">
-        <h3 className="text-lg font-semibold mb-2">Total Leads</h3>
-        <div className="flex items-center">
-          <Users className="w-8 h-8 text-green-600 mr-3" />
-          <span className="text-3xl font-bold">{leadsCount}</span>
-        </div>
-        <div className="mt-4">
-          <div className="flex items-center space-x-2">
-            <input
-              type="number"
-              min="1"
-              max="1000"
-              defaultValue="50"
-              id="leadQuantity"
-              className="w-20 px-2 py-1 border border-gray-300 rounded-md"
-            />
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-4">
+            {/* Distribution Rules */}
+            <div className="bg-gray-50 p-4 rounded-lg space-y-3">
+              <h4 className="font-medium text-gray-900">Distribution Rules</h4>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-start space-x-2">
+                  <div className="w-4 h-4 mt-0.5 rounded-full bg-blue-100 flex items-center justify-center">
+                    <span className="text-blue-600 text-xs">1</span>
+                  </div>
+                  <p className="text-gray-600">New leads are distributed equally among active companies</p>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <div className="w-4 h-4 mt-0.5 rounded-full bg-blue-100 flex items-center justify-center">
+                    <span className="text-blue-600 text-xs">2</span>
+                  </div>
+                  <p className="text-gray-600">All active leads are rotated daily to next eligible company</p>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <div className="w-4 h-4 mt-0.5 rounded-full bg-blue-100 flex items-center justify-center">
+                    <span className="text-blue-600 text-xs">3</span>
+                  </div>
+                  <p className="text-gray-600">Companies never receive the same lead twice</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Rotation Timeline */}
+            <div className="bg-gray-50 p-4 rounded-lg space-y-3">
+              <h4 className="font-medium text-gray-900">Rotation Timeline</h4>
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-gray-600">Daily Rotation</span>
+                  <span className="text-sm font-medium text-blue-600">Every 24 hours</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-gray-600">Keep Lead For</span>
+                  <span className="text-sm font-medium text-blue-600">{rotationPeriod} days</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-gray-600">Archive After</span>
+                  <span className="text-sm font-medium text-purple-600">
+                    {cycleDays} days
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col justify-center space-y-4">
             <button
-              onClick={() => {
-                const quantity = parseInt((document.getElementById('leadQuantity') as HTMLInputElement).value);
-                handleAddFakeData('leads', quantity);
-              }}
-              className="px-3 py-1 bg-green-100 text-green-600 rounded-md hover:bg-green-200 text-sm"
+              onClick={handleDistributeLeads}
+              disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-6 rounded-lg shadow-md transition-colors flex items-center justify-center space-x-2 disabled:opacity-50"
             >
-              Add Fake Leads
+              {loading ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>Processing Distribution...</span>
+                </>
+              ) : (
+                <>
+                  <Users className="w-5 h-5" />
+                  <span>Distribute & Rotate Leads</span>
+                </>
+              )}
             </button>
+            
+            <div className="text-center space-y-2">
+              <p className="text-sm text-gray-600">
+                This will distribute new leads and rotate existing leads
+              </p>
+              <button
+                onClick={() => {
+                  fetchDistributionHistory();
+                  setShowHistoryModal(true);
+                }}
+                className="text-sm text-blue-600 hover:text-blue-700 flex items-center justify-center space-x-1"
+              >
+                <Calendar className="w-4 h-4" />
+                <span>View Distribution History</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
-      <div className="col-span-2 space-y-4">
+
+      {/* Test Data Generation */}
+      <div className="bg-white p-6 rounded-lg shadow-md">
+        <div className="flex justify-between items-center mb-4">
+          <div>
+            <h3 className="text-lg font-semibold">Test Data Generation</h3>
+            <p className="text-sm text-gray-600">Generate fake data for testing purposes</p>
+          </div>
+        </div>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-4">
+            <h4 className="font-medium text-gray-900">Add Fake Companies</h4>
+            <div className="flex flex-col space-y-3">
+              <div className="flex items-center space-x-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  placeholder="Number of companies"
+                  className="w-40 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  onChange={(e) => {
+                    const value = Math.min(50, Math.max(1, parseInt(e.target.value) || 0));
+                    e.target.value = value.toString();
+                  }}
+                  id="companyCount"
+                />
+                <button
+                  onClick={() => {
+                    const input = document.getElementById('companyCount') as HTMLInputElement;
+                    const count = parseInt(input.value);
+                    if (count > 0) {
+                      handleAddFakeData('companies', count);
+                      input.value = '';
+                    }
+                  }}
+                  className="px-4 py-2 bg-blue-100 text-blue-600 rounded-md hover:bg-blue-200"
+                >
+                  Add Companies
+                </button>
+              </div>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => handleAddFakeData('companies', 5)}
+                  className="px-4 py-2 bg-blue-50 text-blue-600 rounded-md hover:bg-blue-100"
+                >
+                  Quick Add 5
+                </button>
+                <button
+                  onClick={() => handleAddFakeData('companies', 10)}
+                  className="px-4 py-2 bg-blue-50 text-blue-600 rounded-md hover:bg-blue-100"
+                >
+                  Quick Add 10
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <div className="space-y-4">
+            <h4 className="font-medium text-gray-900">Add Fake Leads</h4>
+            <div className="flex flex-col space-y-3">
+              <div className="flex items-center space-x-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  placeholder="Number of leads"
+                  className="w-40 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  onChange={(e) => {
+                    const value = Math.min(100, Math.max(1, parseInt(e.target.value) || 0));
+                    e.target.value = value.toString();
+                  }}
+                  id="leadCount"
+                />
+                <button
+                  onClick={() => {
+                    const input = document.getElementById('leadCount') as HTMLInputElement;
+                    const count = parseInt(input.value);
+                    if (count > 0) {
+                      handleAddFakeData('leads', count);
+                      input.value = '';
+                    }
+                  }}
+                  className="px-4 py-2 bg-green-100 text-green-600 rounded-md hover:bg-green-200"
+                >
+                  Add Leads
+                </button>
+              </div>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => handleAddFakeData('leads', 20)}
+                  className="px-4 py-2 bg-green-50 text-green-600 rounded-md hover:bg-green-100"
+                >
+                  Quick Add 20
+                </button>
+                <button
+                  onClick={() => handleAddFakeData('leads', 50)}
+                  className="px-4 py-2 bg-green-50 text-green-600 rounded-md hover:bg-green-100"
+                >
+                  Quick Add 50
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-white p-6 rounded-lg shadow-md">
           <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-semibold">Lead Distribution Options</h3>
-            <button
-              onClick={() => {
-                fetchDistributionHistory();
-                setShowHistoryModal(true);
-              }}
-              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 flex items-center space-x-2"
-            >
-              <Calendar className="w-4 h-4" />
-              <span>View Distribution History</span>
-            </button>
+            <h3 className="text-lg font-semibold">Active Companies</h3>
+            <Building className="w-8 h-8 text-blue-600" />
           </div>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    checked={distributionOptions.distributeToday}
-                    onChange={(e) => setDistributionOptions(prev => ({
-                      ...prev,
-                      distributeToday: e.target.checked
-                    }))}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <span>Distribute Today's Leads</span>
-                </label>
-                <p className="text-sm text-gray-500 ml-6">Distribute new leads among active companies</p>
-              </div>
-              <span className="text-sm font-medium text-blue-600">
-                {todayLeadsCount || 0} leads available
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    checked={distributionOptions.distributeYesterday}
-                    onChange={(e) => setDistributionOptions(prev => ({
-                      ...prev,
-                      distributeYesterday: e.target.checked
-                    }))}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <span>Rotate Yesterday's Leads</span>
-                </label>
-                <p className="text-sm text-gray-500 ml-6">Rotate existing leads between companies</p>
-              </div>
-              <span className="text-sm font-medium text-blue-600">
-                {yesterdayLeadsCount || 0} leads to rotate
-              </span>
-            </div>
+          <div className="text-3xl font-bold text-blue-600 mb-2">
+            {companies.filter(company => {
+              const subscription = calculateSubscriptionDetails(
+                company.subscriptionStartDate,
+                company.subscriptionPlan
+              );
+              return subscription.daysLeft > 0;
+            }).length}
+          </div>
+          <div className="flex justify-between items-center">
+            <p className="text-sm text-gray-600">Companies ready for distribution</p>
+            <button
+              onClick={() => setShowCompanyDistributionModal(true)}
+              className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+            >
+              View Distribution
+            </button>
           </div>
         </div>
 
-        <button
-          onClick={handleDistributeLeads}
-          disabled={loading || (!distributionOptions.distributeToday && !distributionOptions.distributeYesterday)}
-          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition-colors flex items-center justify-center space-x-2 disabled:opacity-50"
-        >
-          {loading ? (
-            <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <span>Distributing Leads...</span>
-            </>
-          ) : (
-            <>
-              <Users className="w-5 h-5" />
-              <span>Distribute Leads</span>
-            </>
-          )}
-        </button>
+        {/* Today's Leads Card */}
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold">Today's Leads</h3>
+            <Users className="w-8 h-8 text-green-600" />
+          </div>
+          <div className="text-3xl font-bold text-green-600 mb-2">
+            {Number(todayLeadsCount) || 0}
+          </div>
+          <div className="flex flex-col">
+            <p className="text-sm text-gray-600">New leads waiting for distribution</p>
+            <p className="text-sm text-blue-600 mt-1">
+              Total: {Number(todayLeadsCount || 0) + Number(yesterdayLeadsCount || 0)} leads 
+              (Today + Previous {rotationPeriod} days)
+            </p>
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold">Yesterday's Leads</h3>
+            <Calendar className="w-8 h-8 text-purple-600" />
+          </div>
+          <div className="text-3xl font-bold text-purple-600 mb-2">
+            {yesterdayLeadsCount}
+          </div>
+          <p className="text-sm text-gray-600">Leads ready for rotation</p>
+        </div>
       </div>
     </div>
   );
@@ -1834,19 +2099,19 @@ export function AdminPanel() {
                 {/* Summary Cards */}
                 <div className="grid grid-cols-3 gap-4">
                   <div className="bg-blue-50 p-4 rounded-lg">
-                    <h3 className="text-sm font-medium text-blue-800 mb-2">Today's Distribution</h3>
-                    <p className="text-2xl font-bold text-blue-600">{distributionResults.todayLeads}</p>
-                    <p className="text-sm text-blue-600">new leads distributed</p>
+                    <h3 className="text-sm font-medium text-blue-800 mb-2">Total Leads</h3>
+                    <p className="text-2xl font-bold text-blue-600">{distributionResults.distributionSummary.totalLeads}</p>
+                    <p className="text-sm text-blue-600">leads processed</p>
                   </div>
                   <div className="bg-green-50 p-4 rounded-lg">
-                    <h3 className="text-sm font-medium text-green-800 mb-2">Yesterday's Rotation</h3>
+                    <h3 className="text-sm font-medium text-green-800 mb-2">Rotated Leads</h3>
                     <p className="text-2xl font-bold text-green-600">{distributionResults.rotatedLeads}</p>
                     <p className="text-sm text-green-600">leads rotated</p>
                   </div>
                   <div className="bg-red-50 p-4 rounded-lg">
-                    <h3 className="text-sm font-medium text-red-800 mb-2">Cleanup</h3>
-                    <p className="text-2xl font-bold text-red-600">{distributionResults.expiredLeads}</p>
-                    <p className="text-sm text-red-600">expired leads removed</p>
+                    <h3 className="text-sm font-medium text-red-800 mb-2">Archived</h3>
+                    <p className="text-2xl font-bold text-red-600">{distributionResults.archivedLeads}</p>
+                    <p className="text-sm text-red-600">leads archived</p>
                   </div>
                 </div>
 
@@ -1871,24 +2136,24 @@ export function AdminPanel() {
                           consultationLeads: 0,
                           visitLeads: 0
                         };
-                        const previousLeads = companyLeadCounts[company] || 0;
-                        const totalLeads = previousLeads + data.newLeads + rotationData.rotatedLeads;
+                        const previousLeads = (companyLeadCounts[company] as CompanyLeadCount)?.total || 0;
+                        const totalLeads = previousLeads + (data?.newLeads || 0) + (rotationData?.rotatedLeads || 0);
                         
                         return (
                           <tr key={company}>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{company}</td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{previousLeads}</td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                              <span className="text-green-600">+{data.newLeads}</span>
+                              <span className="text-green-600">+{data?.newLeads || 0}</span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                              {data.consultationLeads + rotationData.consultationLeads}
+                              {(data?.consultationLeads || 0) + (rotationData?.consultationLeads || 0)}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                              {data.visitLeads + rotationData.visitLeads}
+                              {(data?.visitLeads || 0) + (rotationData?.visitLeads || 0)}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                              <span className="text-blue-600">+{rotationData.rotatedLeads}</span>
+                              <span className="text-blue-600">+{rotationData?.rotatedLeads || 0}</span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{totalLeads}</td>
                           </tr>
@@ -1918,25 +2183,62 @@ export function AdminPanel() {
             <div className="p-6">
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-xl font-semibold text-gray-900">Lead Distribution History</h2>
+                <div className="flex items-center space-x-2">
+                  {selectedHistory.size > 0 && (
+                    <button
+                      onClick={() => {
+                        if (window.confirm(`Are you sure you want to delete ${selectedHistory.size} history items?`)) {
+                          handleDeleteHistory();
+                        }
+                      }}
+                      disabled={deletingHistory}
+                      className="flex items-center px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      {deletingHistory 
+                        ? `Deleting ${selectedHistory.size} items...` 
+                        : `Delete Selected (${selectedHistory.size})`
+                      }
+                    </button>
+                  )}
                 <button
                   onClick={() => setShowHistoryModal(false)}
                   className="text-gray-500 hover:text-gray-700"
                 >
                   <X className="w-6 h-6" />
                 </button>
+                </div>
               </div>
 
               <div className="space-y-6">
                 {distributionHistory.map((record) => (
                   <div key={record.id} className="border rounded-lg p-4">
                     <div className="flex justify-between items-center mb-4">
+                      <div className="flex items-center space-x-4">
+                        <input
+                          type="checkbox"
+                          checked={selectedHistory.has(record.id)}
+                          onChange={() => {
+                            const newSelected = new Set(selectedHistory);
+                            if (newSelected.has(record.id)) {
+                              newSelected.delete(record.id);
+                            } else {
+                              newSelected.add(record.id);
+                            }
+                            setSelectedHistory(newSelected);
+                          }}
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
                       <h3 className="font-medium text-gray-900">
                         Distribution on {new Date(record.timestamp).toLocaleString()}
                       </h3>
+                      </div>
                       <div className="flex space-x-4 text-sm">
-                        <span className="text-blue-600">{record.todayLeads} new leads</span>
+                        <span className="text-blue-600">
+                          {calculateTotalNewLeads(record.distributionSummary)} new leads
+                        </span>
                         <span className="text-green-600">{record.rotatedLeads} rotated</span>
-                        <span className="text-red-600">{record.expiredLeads} expired</span>
+                        <span className="text-red-600">{record.archivedLeads} expired</span>
                       </div>
                     </div>
 
@@ -1966,12 +2268,27 @@ export function AdminPanel() {
                     </table>
                   </div>
                 ))}
+
+                {distributionHistory.length === 0 && (
+                  <div className="text-center py-8 text-gray-500">
+                    No distribution history found
+                  </div>
+                )}
               </div>
 
-              <div className="mt-6">
+              <div className="mt-6 flex justify-between items-center">
+                <label className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={selectedHistory.size === distributionHistory.length}
+                    onChange={toggleSelectAllHistory}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 mr-2"
+                  />
+                  <span className="text-sm text-gray-600">Select All</span>
+                </label>
                 <button
                   onClick={() => setShowHistoryModal(false)}
-                  className="w-full py-2 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
                 >
                   Close
                 </button>
@@ -1980,6 +2297,124 @@ export function AdminPanel() {
           </div>
         </div>
       )}
+
+      {/* Settings Modal */}
+      {isSettingsModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md">
+            <div className="p-6">
+              <h2 className="text-xl font-semibold mb-4">Distribution Settings</h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Rotation Period (n days)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="7"
+                    value={rotationPeriod}
+                    onChange={(e) => setRotationPeriod(parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  />
+                  <p className="mt-1 text-sm text-gray-500">
+                    Rotate leads from previous n days
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Cycle Length (N days)
+                  </label>
+                  <input
+                    type="number"
+                    min="5"
+                    max="30"
+                    value={cycleDays}
+                    onChange={(e) => setCycleDays(parseInt(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  />
+                  <p className="mt-1 text-sm text-gray-500">
+                    Total days to keep rotating leads before archiving
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end space-x-3">
+                <button
+                  onClick={() => setIsSettingsModalOpen(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => updateSettings(rotationPeriod, cycleDays)}
+                  disabled={savingSettings}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {savingSettings ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Company Distribution Modal */}
+      {showCompanyDistributionModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">Company Lead Distribution</h3>
+              <button
+                onClick={() => setShowCompanyDistributionModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              {companies.filter(company => {
+                const subscription = calculateSubscriptionDetails(
+                  company.subscriptionStartDate,
+                  company.subscriptionPlan
+                );
+                return subscription.daysLeft > 0;
+              }).map(company => (
+                <div key={company.id} className="border rounded-lg p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <img src={company.logo} alt={company.name} className="w-12 h-12 object-contain" />
+                      <div>
+                        <h4 className="font-medium">{company.name}</h4>
+                        <p className="text-sm text-gray-600">
+                          {calculateSubscriptionDetails(
+                            company.subscriptionStartDate,
+                            company.subscriptionPlan
+                          ).daysLeft} days left
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-lg font-semibold text-blue-600">
+                        {companyLeadCounts[company.id]?.total || 0}
+                      </p>
+                      <p className="text-sm text-gray-600">Active Leads</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <CompanyDistributionModal />
     </div>
   );
 }
+
+const calculateTotalNewLeads = (summary: DistributionSummary): number => {
+  return Object.values(summary).reduce((sum, data) => sum + (data.newLeads || 0), 0);
+};

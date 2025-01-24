@@ -1,36 +1,126 @@
 import * as React from 'react';
-import { collection, query, where, getDocs, orderBy, doc, updateDoc, getDoc } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Loader2, Phone, Check, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { Loader2, RefreshCw, Calendar, Phone, Check, X } from 'lucide-react';
+import type { Lead, Company } from '../types/index';
 
-interface Lead {
-  id: string;
-  name: string;
-  phone: string;
-  type: 'consultation' | 'visit';
-  timestamp: string;
-  companyId?: string;
-  distributedAt?: string;
-  contacted: boolean;
+type DashboardCompany = Pick<Company, 'id' | 'name' | 'logo' | 'subscriptionPlan' | 'subscriptionStartDate'>;
+
+interface StatusIconProps {
+  status: 'contacted' | 'pending';
+  onClick: () => void;
 }
 
-interface Company {
-  id: string;
-  name: string;
-  logo: string;
-}
+const StatusIcon = ({ status, onClick }: StatusIconProps) => {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+        status === 'contacted' 
+          ? 'bg-green-100 hover:bg-green-200' 
+          : 'bg-red-100 hover:bg-red-200'
+      }`}
+    >
+      {status === 'contacted' ? (
+        <Check className="w-5 h-5 text-green-600" />
+      ) : (
+        <X className="w-5 h-5 text-red-600" />
+      )}
+    </button>
+  );
+};
 
 export function OwnerDashboard() {
   const [leads, setLeads] = React.useState<Lead[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [company, setCompany] = React.useState<Company | null>(null);
+  const [company, setCompany] = React.useState<DashboardCompany | null>(null);
+  const [totalLeads, setTotalLeads] = React.useState(0);
   const navigate = useNavigate();
+
+  const calculateDaysLeft = (startDate: string, plan: string) => {
+    const start = new Date(startDate);
+    const today = new Date();
+    let months = 0;
+    
+    switch (plan) {
+      case '1M': months = 1; break;
+      case '3M': months = 3; break;
+      case '6M': months = 6; break;
+      case '1Y': months = 12; break;
+    }
+    
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + months);
+    return Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  };
+
+  const getPlanDisplay = (plan: string) => {
+    switch (plan) {
+      case '1M': return '1 Month';
+      case '3M': return '3 Months';
+      case '6M': return '6 Months';
+      case '1Y': return '1 Year';
+      default: return plan;
+    }
+  };
+
+  const handleCall = (phone: string) => {
+    // Remove any non-digit characters from the phone number
+    const cleanPhone = phone.replace(/\D/g, '');
+    
+    // Add the country code if it's not present (assuming India +91)
+    const formattedPhone = cleanPhone.startsWith('91') ? cleanPhone : `91${cleanPhone}`;
+    
+    // Create the tel link
+    const telLink = `tel:+${formattedPhone}`;
+    
+    // Open in new tab to ensure it works on all devices
+    window.open(telLink, '_blank');
+  };
+
+  const isToday = (date: string) => {
+    const today = new Date();
+    const leadDate = new Date(date);
+    return today.toDateString() === leadDate.toDateString();
+  };
+
+  const isYesterday = (date: string) => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const leadDate = new Date(date);
+    return yesterday.toDateString() === leadDate.toDateString();
+  };
+
+  const handleStatusToggle = async (leadId: string, currentStatus: 'contacted' | 'pending') => {
+    try {
+      const newStatus = currentStatus === 'contacted' ? 'pending' : 'contacted';
+      
+      // Update in Firestore
+      const leadRef = doc(db, 'leads', leadId);
+      await updateDoc(leadRef, {
+        status: newStatus
+      });
+
+      // Update local state
+      setLeads(prevLeads =>
+        prevLeads.map(lead =>
+          lead.id === leadId
+            ? { ...lead, status: newStatus }
+            : lead
+        )
+      );
+    } catch (err) {
+      console.error('Error updating lead status:', err);
+      // Optionally show error to user
+    }
+  };
 
   const fetchLeads = async () => {
     try {
-      setLoading(true);
+      setRefreshing(true);
       setError(null);
 
       // Get company ID from localStorage
@@ -63,7 +153,9 @@ export function OwnerDashboard() {
       setCompany({
         id: companySnap.id,
         name: companyDetails.name,
-        logo: companyDetails.logo
+        logo: companyDetails.logo,
+        subscriptionPlan: companyDetails.subscriptionPlan,
+        subscriptionStartDate: companyDetails.subscriptionStartDate
       });
 
       // Get leads for this company
@@ -83,9 +175,12 @@ export function OwnerDashboard() {
           timestamp: data.timestamp || new Date().toISOString(),
           companyId: data.companyId,
           distributedAt: data.distributedAt || new Date().toISOString(),
-          contacted: Boolean(data.contacted)
+          contacted: Boolean(data.contacted),
+          status: data.status || 'pending'
         } as Lead;
       });
+
+      setTotalLeads(leadsData.length);
 
       // Sort leads by distributedAt in memory
       const sortedLeads = leadsData.sort((a, b) => {
@@ -104,204 +199,129 @@ export function OwnerDashboard() {
       }
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
   React.useEffect(() => {
-    // Load data only when component mounts (when user opens dashboard)
     fetchLeads();
-  }, []); // Empty dependency array means it only runs once when mounted
-
-  const handleCallClick = (phone: string) => {
-    window.location.href = `tel:${phone}`;
-  };
-
-  const handleContactToggle = async (leadId: string, currentStatus: boolean) => {
-    try {
-      const leadRef = doc(db, 'leads', leadId);
-      await updateDoc(leadRef, {
-        contacted: !currentStatus
-      });
-      
-      // Update local state
-      setLeads(prevLeads => 
-        prevLeads.map(lead => 
-          lead.id === leadId 
-            ? { ...lead, contacted: !currentStatus }
-            : lead
-        )
-      );
-    } catch (err) {
-      console.error('Error updating lead status:', err);
-      if (err instanceof Error) {
-        setError(`Failed to update lead: ${err.message}`);
-      }
-    }
-  };
-
-  const handleRefresh = () => {
-    fetchLeads();
-  };
-
-  const isNewLead = (distributedAt: string) => {
-    const date = new Date(distributedAt || new Date().toISOString());
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    
-    const leadDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-    
-    if (leadDate.getTime() === today.getTime()) {
-      return 'today';
-    } else if (leadDate.getTime() === yesterday.getTime()) {
-      return 'yesterday';
-    }
-    return 'older';
-  };
-
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr || new Date().toISOString());
-    return date.toLocaleString();
-  };
+  }, [navigate]);
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+      <div className="min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center gap-4">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-red-600">{error}</div>
-        <button
-          onClick={handleRefresh}
-          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-        >
-          Try Again
-        </button>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      {/* Company Header */}
+    <div className="container mx-auto px-4 pb-2 pt-4">
       {company && (
-        <div className="bg-white rounded-lg shadow-md p-4 mb-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <img src={company.logo} alt={company.name} className="h-12 w-12 object-contain" />
-              <div>
-                <h1 className="text-xl font-bold text-gray-900">{company.name}</h1>
-                <p className="text-sm text-gray-500">Your Leads Dashboard</p>
-              </div>
+        <div className="mb-4 flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
+          <img src={company.logo} alt={company.name} className="w-14 h-14 object-contain" />
+          <div className="text-center sm:text-left">
+            <h1 className="text-xl font-bold">{company.name}</h1>
+            <div className="flex items-center justify-center sm:justify-start text-gray-600">
+              <Calendar className="w-4 h-4 mr-1" />
+              <span className="text-sm">
+                {getPlanDisplay(company.subscriptionPlan)} Plan • {calculateDaysLeft(company.subscriptionStartDate, company.subscriptionPlan)} days remaining
+              </span>
             </div>
-            <button
-              onClick={handleRefresh}
-              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center gap-2"
-            >
-              <Loader2 className="w-4 h-4" />
-              Refresh
-            </button>
           </div>
         </div>
       )}
 
-      {/* Leads Table */}
+      {/* Total Leads Card with Refresh */}
+      <div className="mb-4">
+        <div className="bg-white p-4 rounded-lg shadow-md">
+          <div className="flex justify-between items-center">
+            <div>
+              <h3 className="text-base font-semibold text-gray-900">Total Leads</h3>
+              <p className="text-2xl font-bold text-blue-600 mt-1">{totalLeads}</p>
+            </div>
+            <button
+              onClick={() => fetchLeads()}
+              disabled={refreshing}
+              className="p-1.5 text-gray-600 hover:text-blue-600 rounded-full transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Leads List */}
       <div className="bg-white rounded-lg shadow-md overflow-hidden">
+        <div className="px-4 sm:px-6 py-3 border-b border-gray-200">
+          <h2 className="text-lg font-semibold">Recent Leads</h2>
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
-                  Status
+                <th className="px-3 sm:px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
+                  <div>Date</div>
+                  <div>Time</div>
                 </th>
-                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Name
-                </th>
-                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Phone
-                </th>
-                <th className="hidden lg:table-cell px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Received
-                </th>
-                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
-                  Call
-                </th>
+                <th className="px-3 sm:px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                <th className="px-3 sm:px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone</th>
+                <th className="px-3 sm:px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-16">Status</th>
+                <th className="px-3 sm:px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-16">Call</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {leads.map((lead) => {
-                const leadAge = isNewLead(lead.distributedAt || '');
-                const bgColor = 
-                  leadAge === 'today' ? 'bg-blue-50' :
-                  leadAge === 'yesterday' ? 'bg-purple-50' :
-                  '';
-                
-                return (
-                  <tr key={lead.id} className={bgColor}>
-                    <td className="px-3 py-3 whitespace-nowrap">
-                      <button
-                        onClick={() => handleContactToggle(lead.id, lead.contacted)}
-                        className={`inline-flex items-center justify-center w-8 h-8 rounded-full ${
-                          lead.contacted
-                            ? 'bg-green-100 text-green-800 hover:bg-green-200'
-                            : 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200'
-                        }`}
-                        title={lead.contacted ? 'Contacted' : 'Pending'}
-                      >
-                        {lead.contacted ? (
-                          <Check className="w-5 h-5" />
-                        ) : (
-                          <X className="w-5 h-5" />
-                        )}
-                        <span className="sr-only">{lead.contacted ? 'Contacted' : 'Pending'}</span>
-                      </button>
-                    </td>
-                    <td className="px-3 py-3 whitespace-nowrap">
-                      <div className="flex flex-col sm:flex-row sm:items-center gap-1">
-                        <span className="font-medium text-gray-900">{lead.name}</span>
-                        {leadAge !== 'older' && (
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                            leadAge === 'today' 
-                              ? 'bg-blue-100 text-blue-800' 
-                              : 'bg-purple-100 text-purple-800'
-                          }`}>
-                            {leadAge === 'today' ? 'Today' : 'Yesterday'}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-3 py-3 whitespace-nowrap">
-                      <span className="text-sm text-gray-500">{lead.phone}</span>
-                    </td>
-                    <td className="hidden lg:table-cell px-3 py-3 whitespace-nowrap text-sm text-gray-500">
-                      {formatDate(lead.distributedAt || '')}
-                    </td>
-                    <td className="px-3 py-3 whitespace-nowrap">
-                      <button
-                        onClick={() => handleCallClick(lead.phone)}
-                        className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-800 hover:bg-blue-200"
-                        title="Call Now"
-                      >
-                        <Phone className="w-5 h-5" />
-                        <span className="sr-only">Call Now</span>
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
+              {leads.map(lead => (
+                <tr 
+                  key={lead.id}
+                  className={`${
+                    isToday(lead.distributedAt || '') 
+                      ? 'bg-blue-100' 
+                      : isYesterday(lead.distributedAt || '') 
+                        ? 'bg-purple-100'
+                        : ''
+                  } hover:bg-opacity-80`}
+                >
+                  <td className="px-3 sm:px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                    <div className="flex flex-col">
+                      <span>{new Date(lead.distributedAt || '').toLocaleDateString()}</span>
+                      <span className="text-gray-500 text-xs">{new Date(lead.distributedAt || '').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                    </div>
+                  </td>
+                  <td className="px-3 sm:px-4 py-3 whitespace-nowrap text-sm text-gray-900">{lead.name}</td>
+                  <td className="px-3 sm:px-4 py-3 whitespace-nowrap text-sm text-gray-900">{lead.phone}</td>
+                  <td className="px-3 sm:px-4 py-3 whitespace-nowrap">
+                    <div className="flex justify-center">
+                      <StatusIcon 
+                        status={lead.status} 
+                        onClick={() => handleStatusToggle(lead.id, lead.status)}
+                      />
+                    </div>
+                  </td>
+                  <td className="px-3 sm:px-4 py-3 whitespace-nowrap text-center">
+                    <button
+                      onClick={() => handleCall(lead.phone)}
+                      className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-600 hover:bg-blue-200 transition-colors"
+                    >
+                      <Phone className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-        
         {leads.length === 0 && (
-          <div className="text-center py-12">
-            <p className="text-gray-500 text-sm">No leads available yet</p>
+          <div className="text-center py-6 text-gray-500">
+            No leads available
           </div>
         )}
       </div>

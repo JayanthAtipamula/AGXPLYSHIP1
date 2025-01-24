@@ -39,6 +39,12 @@ export function LeadDistribution() {
       setLoading(true);
       setError(null);
 
+      // Validate custom date range
+      if (filterPeriod === 'custom' && (!customDateRange.start || !customDateRange.end)) {
+        setError('Please select both start and end dates');
+        return;
+      }
+
       // Get date range
       let startDate: Date;
       let endDate = new Date();
@@ -57,10 +63,6 @@ export function LeadDistribution() {
           endDate.setHours(23, 59, 59, 999);
           break;
         case 'custom':
-          if (!customDateRange.start || !customDateRange.end) {
-            setError('Please select both start and end dates');
-            return;
-          }
           startDate = new Date(customDateRange.start);
           startDate.setHours(0, 0, 0, 0);
           endDate = new Date(customDateRange.end);
@@ -113,6 +115,12 @@ export function LeadDistribution() {
 
     if (companies.length === 0) {
       setError('No companies available for distribution');
+      return;
+    }
+
+    // Add validation for custom date range
+    if (filterPeriod === 'custom' && (!customDateRange.start || !customDateRange.end)) {
+      setError('Please select both start and end dates');
       return;
     }
 
@@ -173,19 +181,24 @@ export function LeadDistribution() {
           </select>
 
           {filterPeriod === 'custom' && (
-            <div className="flex gap-2">
-              <input
-                type="date"
-                value={customDateRange.start}
-                onChange={(e) => setCustomDateRange(prev => ({ ...prev, start: e.target.value }))}
-                className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <input
-                type="date"
-                value={customDateRange.end}
-                onChange={(e) => setCustomDateRange(prev => ({ ...prev, end: e.target.value }))}
-                className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
+            <div className="flex flex-col gap-2">
+              <div className="flex gap-2">
+                <input
+                  type="date"
+                  value={customDateRange.start}
+                  onChange={(e) => setCustomDateRange(prev => ({ ...prev, start: e.target.value }))}
+                  className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <input
+                  type="date"
+                  value={customDateRange.end}
+                  onChange={(e) => setCustomDateRange(prev => ({ ...prev, end: e.target.value }))}
+                  className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              {error && filterPeriod === 'custom' && (!customDateRange.start || !customDateRange.end) && (
+                <p className="text-sm text-red-600">{error}</p>
+              )}
             </div>
           )}
         </div>
