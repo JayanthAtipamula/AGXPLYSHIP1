@@ -13,7 +13,7 @@ interface Lead {
   status: string;
 }
 
-type FilterPeriod = 'today' | 'yesterday' | 'last7days' | 'custom';
+type FilterPeriod = 'today' | 'yesterday' | 'last7days' | 'last1month' | 'custom';
 
 interface PaginationConfig {
   itemsPerPage: number;
@@ -75,6 +75,11 @@ export function LeadsView() {
         case 'last7days':
           startDate = new Date();
           startDate.setDate(startDate.getDate() - 7);
+          startDate.setHours(0, 0, 0, 0);
+          break;
+        case 'last1month':
+          startDate = new Date();
+          startDate.setMonth(startDate.getMonth() - 1);
           startDate.setHours(0, 0, 0, 0);
           break;
         case 'custom':
@@ -167,9 +172,33 @@ export function LeadsView() {
     }
   };
 
+  const handleDateRangeChange = (field: 'start' | 'end', value: string) => {
+    setCustomDateRange(prev => {
+      const newRange = { ...prev, [field]: value };
+      
+      if (newRange.start && newRange.end) {
+        const startDate = new Date(newRange.start);
+        const endDate = new Date(newRange.end);
+        
+        if (endDate < startDate) {
+          if (field === 'start') {
+            newRange.end = value;
+          } else {
+            newRange.start = value;
+          }
+        }
+        
+        setError(null);
+        setTimeout(() => fetchLeads(), 0);
+      }
+      
+      return newRange;
+    });
+  };
+
   React.useEffect(() => {
     fetchLeads();
-  }, [fetchLeads]);
+  }, [fetchLeads, filterPeriod]);
 
   if (loading) {
     return (
@@ -192,45 +221,65 @@ export function LeadsView() {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
         <h2 className="text-2xl font-bold">Leads</h2>
         
-        <div className="flex flex-wrap gap-3">
-          <select
-            value={filterPeriod}
-            onChange={(e) => setFilterPeriod(e.target.value as FilterPeriod)}
-            className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="today">Today</option>
-            <option value="yesterday">Yesterday</option>
-            <option value="last7days">Last 7 Days</option>
-            <option value="custom">Custom Range</option>
-          </select>
+        <div className="flex flex-col gap-3 w-full sm:w-auto">
+          <div className="flex flex-wrap gap-3">
+            <select
+              value={filterPeriod}
+              onChange={(e) => {
+                setFilterPeriod(e.target.value as FilterPeriod);
+                if (e.target.value !== 'custom') {
+                  setCustomDateRange({ start: '', end: '' });
+                  setError(null);
+                }
+              }}
+              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="last7days">Last 7 Days</option>
+              <option value="last1month">Last 1 Month</option>
+              <option value="custom">Custom Range</option>
+            </select>
+
+            <select
+              value={pagination.itemsPerPage}
+              onChange={(e) => setPagination(prev => ({ ...prev, itemsPerPage: Number(e.target.value), currentPage: 1 }))}
+              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="10">10 per page</option>
+              <option value="20">20 per page</option>
+              <option value="50">50 per page</option>
+              <option value="100">100 per page</option>
+            </select>
+          </div>
 
           {filterPeriod === 'custom' && (
-            <div className="flex gap-2">
-              <input
-                type="date"
-                value={customDateRange.start}
-                onChange={(e) => setCustomDateRange(prev => ({ ...prev, start: e.target.value }))}
-                className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <input
-                type="date"
-                value={customDateRange.end}
-                onChange={(e) => setCustomDateRange(prev => ({ ...prev, end: e.target.value }))}
-                className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
+            <div className="flex flex-col gap-2 w-full sm:w-auto">
+              <div className="flex gap-2">
+                <div className="flex flex-col gap-1 flex-1">
+                  <label className="text-sm text-gray-600">Start Date</label>
+                  <input
+                    type="date"
+                    value={customDateRange.start}
+                    onChange={(e) => handleDateRangeChange('start', e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
+                  />
+                </div>
+                <div className="flex flex-col gap-1 flex-1">
+                  <label className="text-sm text-gray-600">End Date</label>
+                  <input
+                    type="date"
+                    value={customDateRange.end}
+                    onChange={(e) => handleDateRangeChange('end', e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
+                  />
+                </div>
+              </div>
+              {filterPeriod === 'custom' && (!customDateRange.start || !customDateRange.end) && (
+                <div className="text-red-500 text-sm">Please select both start and end dates</div>
+              )}
             </div>
           )}
-
-          <select
-            value={pagination.itemsPerPage}
-            onChange={(e) => setPagination(prev => ({ ...prev, itemsPerPage: Number(e.target.value), currentPage: 1 }))}
-            className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="10">10 per page</option>
-            <option value="20">20 per page</option>
-            <option value="50">50 per page</option>
-            <option value="100">100 per page</option>
-          </select>
         </div>
       </div>
 

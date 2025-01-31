@@ -1,11 +1,25 @@
 import * as React from 'react';
-import { collection, getDocs, query, where, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, getDoc, updateDoc, orderBy } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useNavigate } from 'react-router-dom';
 import { Loader2, RefreshCw, Calendar, Phone, Check, X } from 'lucide-react';
-import type { Lead, Company } from '../types/index';
+import type { Company } from '../types/index';
 
 type DashboardCompany = Pick<Company, 'id' | 'name' | 'logo' | 'subscriptionPlan' | 'subscriptionStartDate'>;
+
+interface Lead {
+  id: string;
+  name: string;
+  phone: string;
+  type: 'consultation' | 'visit';
+  timestamp: string;
+  companyId: string;
+  distributedAt?: string;
+  contacted: boolean;
+  status: 'contacted' | 'pending';
+  previousCompanyIds?: string[];
+  isCurrentLead?: boolean;
+}
 
 interface StatusIconProps {
   status: 'contacted' | 'pending';
@@ -38,6 +52,8 @@ export function OwnerDashboard() {
   const [error, setError] = React.useState<string | null>(null);
   const [company, setCompany] = React.useState<DashboardCompany | null>(null);
   const [totalLeads, setTotalLeads] = React.useState(0);
+  const [rotationPeriodLeadsCount, setRotationPeriodLeadsCount] = React.useState(0);
+  const [rotationPeriod, setRotationPeriod] = React.useState(7); // Default to 7 days
   const navigate = useNavigate();
 
   const calculateDaysLeft = (startDate: string, plan: string) => {
@@ -158,16 +174,31 @@ export function OwnerDashboard() {
         subscriptionStartDate: companyDetails.subscriptionStartDate
       });
 
-      // Get leads for this company
+      // Get all leads for this company (both current and previous), ordered by distributedAt timestamp
       const leadsQuery = query(
         collection(db, 'leads'),
-        where('companyId', '==', companyId)
+        where('previousCompanyIds', 'array-contains', companyId),
+        orderBy('distributedAt', 'desc')
       );
+
+      const currentLeadsQuery = query(
+        collection(db, 'leads'),
+        where('companyId', '==', companyId),
+        orderBy('distributedAt', 'desc')
+      );
+
+      const [leadsSnapshot, currentLeadsSnapshot] = await Promise.all([
+        getDocs(leadsQuery),
+        getDocs(currentLeadsQuery)
+      ]);
+
+      // Combine and deduplicate leads
+      const leadsMap = new Map();
       
-      const leadsSnapshot = await getDocs(leadsQuery);
-      const leadsData = leadsSnapshot.docs.map(doc => {
+      // Add current leads first
+      currentLeadsSnapshot.docs.forEach(doc => {
         const data = doc.data();
-        return {
+        leadsMap.set(doc.id, {
           id: doc.id,
           name: data.name || '',
           phone: data.phone || '',
@@ -176,20 +207,57 @@ export function OwnerDashboard() {
           companyId: data.companyId,
           distributedAt: data.distributedAt || new Date().toISOString(),
           contacted: Boolean(data.contacted),
-          status: data.status || 'pending'
-        } as Lead;
+          status: data.status || 'pending',
+          previousCompanyIds: data.previousCompanyIds || [],
+          isCurrentLead: true
+        });
       });
 
-      setTotalLeads(leadsData.length);
-
-      // Sort leads by distributedAt in memory
-      const sortedLeads = leadsData.sort((a, b) => {
-        const dateA = new Date(a.distributedAt || '').getTime();
-        const dateB = new Date(b.distributedAt || '').getTime();
-        return dateB - dateA; // Sort in descending order (newest first)
+      // Add previous leads
+      leadsSnapshot.docs.forEach(doc => {
+        if (!leadsMap.has(doc.id)) {
+          const data = doc.data();
+          leadsMap.set(doc.id, {
+            id: doc.id,
+            name: data.name || '',
+            phone: data.phone || '',
+            type: data.type || 'consultation',
+            timestamp: data.timestamp || new Date().toISOString(),
+            companyId: data.companyId,
+            distributedAt: data.distributedAt || new Date().toISOString(),
+            contacted: Boolean(data.contacted),
+            status: data.status || 'pending',
+            previousCompanyIds: data.previousCompanyIds || [],
+            isCurrentLead: false
+          });
+        }
       });
 
+      // Convert map to array and sort
+      const sortedLeads = Array.from(leadsMap.values()).sort((a, b) => {
+        // Sort by isCurrentLead first (current leads on top)
+        if (a.isCurrentLead && !b.isCurrentLead) return -1;
+        if (!a.isCurrentLead && b.isCurrentLead) return 1;
+        
+        // Then sort by distributedAt timestamp
+        const dateA = new Date(a.distributedAt || a.timestamp);
+        const dateB = new Date(b.distributedAt || b.timestamp);
+        return dateB.getTime() - dateA.getTime();
+      });
+
+      setTotalLeads(sortedLeads.length);
       setLeads(sortedLeads);
+
+      // Calculate rotation period leads (last n days)
+      const nDaysAgo = new Date();
+      nDaysAgo.setDate(nDaysAgo.getDate() - rotationPeriod);
+      const rotationPeriodLeads = sortedLeads.filter(lead => {
+        const leadDate = new Date(lead.distributedAt || new Date().toISOString());
+        return leadDate >= nDaysAgo;
+      });
+
+      setRotationPeriodLeadsCount(rotationPeriodLeads.length);
+
     } catch (err) {
       console.error('Error fetching leads:', err);
       if (err instanceof Error) {
@@ -240,21 +308,19 @@ export function OwnerDashboard() {
         </div>
       )}
 
-      {/* Total Leads Card with Refresh */}
-      <div className="mb-4">
-        <div className="bg-white p-4 rounded-lg shadow-md">
-          <div className="flex justify-between items-center">
-            <div>
-              <h3 className="text-base font-semibold text-gray-900">Total Leads</h3>
-              <p className="text-2xl font-bold text-blue-600 mt-1">{totalLeads}</p>
-            </div>
-            <button
-              onClick={() => fetchLeads()}
-              disabled={refreshing}
-              className="p-1.5 text-gray-600 hover:text-blue-600 rounded-full transition-colors disabled:opacity-50"
-            >
-              <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
-            </button>
+      {/* Stats Section */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h3 className="text-lg font-semibold mb-2">Today's Leads</h3>
+          <div className="text-3xl font-bold text-blue-600">
+            {leads.filter(lead => isToday(lead.distributedAt || '')).length}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h3 className="text-lg font-semibold mb-2">Total Leads</h3>
+          <div className="text-3xl font-bold text-blue-600">
+            {totalLeads}
           </div>
         </div>
       </div>
@@ -288,12 +354,17 @@ export function OwnerDashboard() {
                       : isYesterday(lead.distributedAt || '') 
                         ? 'bg-purple-100'
                         : ''
-                  } hover:bg-opacity-80`}
+                  } ${!lead.isCurrentLead ? 'opacity-75' : ''} hover:bg-opacity-80`}
                 >
                   <td className="px-3 sm:px-4 py-3 whitespace-nowrap text-sm text-gray-900">
                     <div className="flex flex-col">
                       <span>{new Date(lead.distributedAt || '').toLocaleDateString()}</span>
-                      <span className="text-gray-500 text-xs">{new Date(lead.distributedAt || '').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      <span className="text-gray-500 text-xs">
+                        {new Date(lead.distributedAt || '').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {!lead.isCurrentLead && (
+                          <span className="ml-1 text-gray-400">(Previous)</span>
+                        )}
+                      </span>
                     </div>
                   </td>
                   <td className="px-3 sm:px-4 py-3 whitespace-nowrap text-sm text-gray-900">{lead.name}</td>

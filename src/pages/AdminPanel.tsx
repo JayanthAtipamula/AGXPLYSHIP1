@@ -10,6 +10,7 @@ import { LeadDistribution } from '../components/LeadDistribution';
 import { signOut } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { useNavigate } from 'react-router-dom';
+import { DistributedDataView } from '../components/DistributedDataView';
 
 interface Company {
   id: string;
@@ -30,7 +31,7 @@ interface Company {
 interface Lead {
   id: string;
   type: 'consultation' | 'visit';
-  status: 'active' | 'archived';
+  status: 'active' | 'archived' | 'new';
   companyId: string | null;
   distributedAt?: string;
   previousCompanyIds?: string[];
@@ -38,13 +39,15 @@ interface Lead {
 }
 
 interface DistributionResults {
+  todayLeads: number;
   rotatedLeads: number;
-  archivedLeads: number;
+  expiredLeads: number;
   activeCompanies: number;
   distributionSummary: Record<string, {
     newLeads: number;
     consultationLeads: number;
     visitLeads: number;
+    rotatedLeads: number;
   }>;
   rotationSummary: Record<string, {
     rotatedLeads: number;
@@ -108,7 +111,20 @@ interface DistributionSummary {
   [company: string]: DistributionSummaryData;
 }
 
-export function AdminPanel() {
+interface DistributionSummary {
+  newLeads: number;
+  consultationLeads: number;
+  visitLeads: number;
+  rotatedLeads: number;
+}
+
+interface RotationSummary {
+  rotatedLeads: number;
+  consultationLeads: number;
+  visitLeads: number;
+}
+
+function AdminPanel() {
   const [activeView, setActiveView] = React.useState<ActiveView>('dashboard');
   const [companies, setCompanies] = React.useState<Company[]>([]);
   const [leadsCount, setLeadsCount] = React.useState(0);
@@ -157,6 +173,7 @@ export function AdminPanel() {
   const [deletingHistory, setDeletingHistory] = React.useState(false);
   // Add new state for company distribution modal
   const [showCompanyDistributionModal, setShowCompanyDistributionModal] = React.useState(false);
+  const [totalLeadsCount, setTotalLeadsCount] = React.useState(0);
 
   React.useEffect(() => {
     fetchData();
@@ -217,24 +234,16 @@ export function AdminPanel() {
 
   const fetchLeadCounts = async () => {
     try {
-      const counts: CompanyDistribution = {};
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
       const leadsRef = collection(db, 'leads');
-      const q = query(leadsRef, where('status', '==', 'active'));
-      const querySnapshot = await getDocs(q);
-      
-      querySnapshot.forEach(doc => {
-        const lead = doc.data();
-        if (lead.companyId) {
-          if (!counts[lead.companyId]) {
-            counts[lead.companyId] = { total: 0, consultation: 0, visit: 0 };
-          }
-          counts[lead.companyId].total++;
-          if (lead.type === 'consultation') counts[lead.companyId].consultation++;
-          if (lead.type === 'visit') counts[lead.companyId].visit++;
-        }
-      });
-      
-      setCompanyLeadCounts(counts);
+      const todayQuery = query(leadsRef, where('timestamp', '>=', today.toISOString()));
+      const todaySnapshot = await getDocs(todayQuery);
+      setTodayLeadsCount(todaySnapshot.size);
+
+      const allLeadsSnapshot = await getDocs(leadsRef);
+      setTotalLeadsCount(allLeadsSnapshot.size);
     } catch (err) {
       console.error('Error fetching lead counts:', err);
     }
@@ -682,18 +691,21 @@ export function AdminPanel() {
       });
 
       // Rotate previous leads
+      let rotationIndex = 0;
       leadsToRotate.forEach(doc => {
         const lead = doc.data() as Lead;
         const previousCompanyIds = lead.previousCompanyIds || [];
         
-        // Find next eligible company
+        // Find eligible companies (companies that haven't received this lead before)
         const eligibleCompanies = activeCompanies.filter(company => 
           !previousCompanyIds.includes(company.id)
         );
 
         if (eligibleCompanies.length > 0) {
-          // Rotate to next company
-          const nextCompany = eligibleCompanies[0];
+          // Rotate to next company using round-robin
+          const nextCompany = eligibleCompanies[rotationIndex % eligibleCompanies.length];
+          rotationIndex++;
+          
           batch.update(doc.ref, {
             companyId: nextCompany.id,
             distributedAt: new Date().toISOString(),
@@ -741,8 +753,9 @@ export function AdminPanel() {
 
       // Update UI
       const results: DistributionResults = {
+        todayLeads: todayLeads.length,
         rotatedLeads: leadsToRotate.length,
-        archivedLeads: leadsToRotate.filter(doc => {
+        expiredLeads: leadsToRotate.filter(doc => {
           const lead = doc.data() as Lead;
           const previousCompanyIds = lead.previousCompanyIds || [];
           return previousCompanyIds.length >= activeCompanies.length;
@@ -751,6 +764,17 @@ export function AdminPanel() {
         distributionSummary: companyDistribution,
         rotationSummary
       };
+
+      // Add rotatedLeads count to distribution summary
+      for (const [companyId, summary] of Object.entries(distributionSummary)) {
+        results.distributionSummary[companyId] = {
+          ...summary,
+          rotatedLeads: 0  // Initialize with 0 if not present
+        };
+      }
+
+      // Update rotation summary
+      results.rotationSummary = rotationSummary;
 
       setDistributionResults(results);
       setShowDistributionModal(true);
@@ -786,12 +810,23 @@ export function AdminPanel() {
 
   const generateFakeLead = () => {
     const types: Lead['type'][] = ['consultation', 'visit'];
+    
+    // Generate a random date from the last 7 days
     const now = new Date();
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    // Get random timestamp between 7 days ago and now
+    const randomTimestamp = new Date(
+      sevenDaysAgo.getTime() + Math.random() * (now.getTime() - sevenDaysAgo.getTime())
+    );
+    
     return {
       name: `Lead ${Math.floor(Math.random() * 1000)}`,
       phone: `+91${Math.floor(Math.random() * 9000000000) + 1000000000}`,
       type: types[Math.floor(Math.random() * types.length)],
-      timestamp: now.toISOString(),
+      timestamp: randomTimestamp.toISOString(),
+      status: 'new',
       companyId: null
     };
   };
@@ -974,114 +1009,76 @@ export function AdminPanel() {
 
   const renderDashboard = () => (
     <div className="space-y-6">
-      {/* Distribution Controls - Moving to top for prominence */}
-      <div className="bg-white p-6 rounded-lg shadow-md">
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <h3 className="text-xl font-semibold">Lead Distribution Controls</h3>
-            <p className="text-sm text-gray-600 mt-1">Configure and manage lead distribution settings</p>
-          </div>
-          <div className="flex items-center space-x-4">
-            <div className="text-right">
-              <div className="text-sm text-gray-600">Current Rotation Period</div>
-              <div className="text-2xl font-bold text-blue-600">{rotationPeriod} days</div>
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h3 className="text-lg font-semibold text-gray-900">Today's Leads</h3>
+          <div className="mt-2 flex items-center">
+            <div className="text-3xl font-bold text-blue-600">
+              {todayLeadsCount}
             </div>
-            <button
-              onClick={() => setIsSettingsModalOpen(true)}
-              className="px-4 py-2 bg-blue-100 text-blue-600 rounded-md hover:bg-blue-200 flex items-center space-x-2"
-            >
-              <Edit className="w-4 h-4" />
-              <span>Change Period</span>
-            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="space-y-4">
-            {/* Distribution Rules */}
-            <div className="bg-gray-50 p-4 rounded-lg space-y-3">
-              <h4 className="font-medium text-gray-900">Distribution Rules</h4>
-              <div className="space-y-2 text-sm">
-                <div className="flex items-start space-x-2">
-                  <div className="w-4 h-4 mt-0.5 rounded-full bg-blue-100 flex items-center justify-center">
-                    <span className="text-blue-600 text-xs">1</span>
-                  </div>
-                  <p className="text-gray-600">New leads are distributed equally among active companies</p>
-                </div>
-                <div className="flex items-start space-x-2">
-                  <div className="w-4 h-4 mt-0.5 rounded-full bg-blue-100 flex items-center justify-center">
-                    <span className="text-blue-600 text-xs">2</span>
-                  </div>
-                  <p className="text-gray-600">All active leads are rotated daily to next eligible company</p>
-                </div>
-                <div className="flex items-start space-x-2">
-                  <div className="w-4 h-4 mt-0.5 rounded-full bg-blue-100 flex items-center justify-center">
-                    <span className="text-blue-600 text-xs">3</span>
-                  </div>
-                  <p className="text-gray-600">Companies never receive the same lead twice</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Rotation Timeline */}
-            <div className="bg-gray-50 p-4 rounded-lg space-y-3">
-              <h4 className="font-medium text-gray-900">Rotation Timeline</h4>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Daily Rotation</span>
-                  <span className="text-sm font-medium text-blue-600">Every 24 hours</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Keep Lead For</span>
-                  <span className="text-sm font-medium text-blue-600">{rotationPeriod} days</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Archive After</span>
-                  <span className="text-sm font-medium text-purple-600">
-                    {cycleDays} days
-                  </span>
-                </div>
-              </div>
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h3 className="text-lg font-semibold text-gray-900">Active Companies</h3>
+          <div className="mt-2 flex items-center">
+            <div className="text-3xl font-bold text-blue-600">
+              {companies.filter(company => {
+                const subscription = calculateSubscriptionDetails(
+                  company.subscriptionStartDate,
+                  company.subscriptionPlan
+                );
+                return subscription.daysLeft > 0;
+              }).length}
             </div>
           </div>
+        </div>
 
-          <div className="flex flex-col justify-center space-y-4">
-            <button
-              onClick={handleDistributeLeads}
-              disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-6 rounded-lg shadow-md transition-colors flex items-center justify-center space-x-2 disabled:opacity-50"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Processing Distribution...</span>
-                </>
-              ) : (
-                <>
-                  <Users className="w-5 h-5" />
-                  <span>Distribute & Rotate Leads</span>
-                </>
-              )}
-            </button>
-            
-            <div className="text-center space-y-2">
-              <p className="text-sm text-gray-600">
-                This will distribute new leads and rotate existing leads
-              </p>
-              <button
-                onClick={() => {
-                  fetchDistributionHistory();
-                  setShowHistoryModal(true);
-                }}
-                className="text-sm text-blue-600 hover:text-blue-700 flex items-center justify-center space-x-1"
-              >
-                <Calendar className="w-4 h-4" />
-                <span>View Distribution History</span>
-              </button>
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h3 className="text-lg font-semibold text-gray-900">Total Leads</h3>
+          <div className="mt-2 flex items-center">
+            <div className="text-3xl font-bold text-blue-600">
+              {totalLeadsCount}
             </div>
           </div>
         </div>
       </div>
+
+      {/* Distribution Button */}
+      <div className="bg-white p-6 rounded-lg shadow-md">
+        <div className="flex justify-between items-center">
+          <div>
+            <h3 className="text-xl font-semibold">Lead Distribution</h3>
+            <p className="text-sm text-gray-600 mt-1">Distribute new leads to active companies</p>
+          </div>
+          <button
+            onClick={handleDistributeLeads}
+            disabled={loading}
+            className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2 disabled:opacity-50"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>Processing...</span>
+              </>
+            ) : (
+              <>
+                <Users className="w-5 h-5" />
+                <span>Distribute Leads</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Distribution Results */}
+      {distributionResults && (
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h3 className="text-xl font-semibold mb-4">Latest Distribution Results</h3>
+          <DistributedDataView distributionResults={distributionResults} />
+        </div>
+      )}
 
       {/* Test Data Generation */}
       <div className="bg-white p-6 rounded-lg shadow-md">
@@ -2100,7 +2097,11 @@ export function AdminPanel() {
                 <div className="grid grid-cols-3 gap-4">
                   <div className="bg-blue-50 p-4 rounded-lg">
                     <h3 className="text-sm font-medium text-blue-800 mb-2">Total Leads</h3>
-                    <p className="text-2xl font-bold text-blue-600">{distributionResults.distributionSummary.totalLeads}</p>
+                    <p className="text-2xl font-bold text-blue-600">
+                      {typeof distributionResults.distributionSummary === 'object' 
+                        ? Object.values(distributionResults.distributionSummary).reduce((sum, data) => sum + (data.newLeads || 0), 0)
+                        : 0}
+                    </p>
                     <p className="text-sm text-blue-600">leads processed</p>
                   </div>
                   <div className="bg-green-50 p-4 rounded-lg">
@@ -2109,9 +2110,9 @@ export function AdminPanel() {
                     <p className="text-sm text-green-600">leads rotated</p>
                   </div>
                   <div className="bg-red-50 p-4 rounded-lg">
-                    <h3 className="text-sm font-medium text-red-800 mb-2">Archived</h3>
-                    <p className="text-2xl font-bold text-red-600">{distributionResults.archivedLeads}</p>
-                    <p className="text-sm text-red-600">leads archived</p>
+                    <h3 className="text-sm font-medium text-red-800 mb-2">Expired</h3>
+                    <p className="text-2xl font-bold text-red-600">{distributionResults.expiredLeads}</p>
+                    <p className="text-sm text-red-600">leads expired</p>
                   </div>
                 </div>
 
@@ -2418,3 +2419,5 @@ export function AdminPanel() {
 const calculateTotalNewLeads = (summary: DistributionSummary): number => {
   return Object.values(summary).reduce((sum, data) => sum + (data.newLeads || 0), 0);
 };
+
+export default AdminPanel;
